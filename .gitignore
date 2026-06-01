@@ -5,3 +5,5 @@
 __pycache__/
 *.pyc
 .agent_memory/
+HNS.rar
+dist/dist.rar
