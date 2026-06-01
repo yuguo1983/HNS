@@ -1283,12 +1283,12 @@ class Agent:
             # 模型完成回复
             if resp.stop_reason == "end_turn":
                 self.memory.add_to_short_term("assistant", partial_text)
-                print(f"\n  {s['ai']}━" * 40)
+                print(f"\n  {s['ai']}━" * 20)
                 print(f"  {s['ai']}🤖  Denny Agent  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
-                print(f"  {s['ai']}━" * 40)
+                print(f"  {s['ai']}━" * 20)
                 for line in partial_text.split('\n'):
                     print(f"  {line}")
-                print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
+                print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
                 self.logger.ai_response(partial_text)
 
                 if len(self.memory.short_term) >= 10:
@@ -1315,11 +1315,11 @@ class Agent:
                 for block in tool_blocks:
                     tool_name = block.name
                     tool_input = block.input or {}
-                    print(f"\n  {s['tool']}━" * 40)
+                    print(f"\n  {s['tool']}━" * 20)
                     print(f"  {s['tool']}🔧  {tool_name}{s['reset']}")
                     if tool_input:
                         print(f"  {s['dim']}{json.dumps(tool_input, ensure_ascii=False)}{s['reset']}")
-                    print(f"  {s['tool']}━" * 40)
+                    print(f"  {s['tool']}━" * 20)
 
                     try:
                         handler = TOOL_HANDLERS.get(tool_name)
@@ -1742,11 +1742,11 @@ class Agent:
                 )
                 try:
                     result = await orchestrator.orchestrate(goal)
-                    print(f"\n  {s['ai']}━" * 40)
+                    print(f"\n  {s['ai']}━" * 20)
                     print(f"  {s['ai']}🧩  Swarm 最终整合结果  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
-                    print(f"  {s['ai']}━" * 40)
+                    print(f"  {s['ai']}━" * 20)
                     print(f"  {result}")
-                    print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
+                    print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
                     self.logger.swarm(goal, result)
                 except Exception as e:
                     print(f"  {s['err']}⚠ Swarm 错误: {e}{s['reset']}")
@@ -1826,11 +1826,11 @@ async def main():
         orchestrator = OrchestratorAgent()
         result = await orchestrator.orchestrate(args.swarm_goal)
         s = Agent._style()
-        print(f"\n  {s['ai']}━" * 40)
+        print(f"\n  {s['ai']}━" * 20)
         print(f"  {s['ai']}🧩  Swarm 最终整合结果{s['reset']}")
-        print(f"  {s['ai']}━" * 40)
+        print(f"  {s['ai']}━" * 20)
         print(f"  {result}")
-        print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
+        print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
         return
 
     # --pipe 模式：从 stdin 读取
