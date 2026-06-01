@@ -1,132 +1,61 @@
-# AtomCode Agent - 最精简智能体
+# HNS - 智能体系统
 
-支持 **本地工具 / MCP 工具 / Skills / LLM 对话 / 记忆系统** 的 Python 智能体。
+基于 LLM 的 Python 智能体，支持**本地工具调用 / MCP 扩展 / Skills 技能 / 三层记忆系统**。
 
-## 依赖
+## 项目文件
 
-```bash
-pip install anthropic mcp langchain openai
+```
+F:\HNS\
+├── agent.py            # 智能体核心（含记忆系统 + 工具调用）
+├── swarm_agent.py      # 群智能体（多 Agent 协作）
+├── ymodem_debug.py     # YModem 调试工具
+├── ymodem_gui.py       # YModem GUI 界面
+├── ymodem_send.py      # YModem 发送工具
+├── .config             # API 配置（不提交）
+├── .config.example     # 配置模板
+├── .gitignore
+└── README.md
 ```
 
 ## 快速开始
 
 ```bash
-# 编辑 .config 配置文件
-# 设置 API Key 和 Base URL
+pip install anthropic mcp langchain openai
 
+# 编辑 .config 配置 API Key 和 Base URL
 # 运行
 python agent.py
 ```
 
-## 内置工具
+## 核心功能
 
-| 工具 | 说明 |
+| 功能 | 说明 |
 |------|------|
-| `web_search` | DuckDuckGo 搜索 |
-| `read_file` | 读取文件内容 |
-| `write_file` | 创建/覆盖文件 |
-| `run_command` | 执行 shell 命令 |
-| `list_dir` | 列出目录 |
-| `calc` | 数学计算 |
+| **工具调用** | 搜索、文件读写、命令执行、计算等内置工具 |
+| **MCP 扩展** | 支持挂载任意 MCP 服务器扩展能力 |
+| **Skills** | JSON 定义的自定义技能插件 |
+| **三层记忆** | 短期记忆 + 长期记忆（持久化）+ 情景记忆 |
+| **群智能体** | 多 Agent 协同工作（swarm_agent.py） |
 
 ## 记忆系统
 
-三层记忆架构：
+- **短期记忆** — 当前会话上下文（最多 20 条）
+- **长期记忆** — 跨会话持久化的事实与偏好（`.agent_memory/long_term.json`）
+- **情景记忆** — 历史对话摘要（保留最近 5 条）
 
-### 1. 短期记忆 (Short-term)
-- 当前会话的完整对话历史
-- 受上下文窗口限制，最多保留 20 条消息
-- 对话结束后自动清空
+聊天中输入 `memory` 查看记忆状态，输入 `clear` 清空短期记忆。
 
-### 2. 长期记忆 (Long-term)
-- 从对话中自动提取的事实和偏好
-- 跨会话持久化存储在 `.agent_memory/long_term.json`
-- 每次对话结束时自动提取新信息
-- 对话开始时自动加载到系统提示中
-
-### 3. 情景记忆 (Episodic)
-- 已结束对话的 LLM 摘要
-- 最近 5 条摘要保留在记忆中
-- 帮助 Agent 回顾之前的对话内容
-
-### 交互命令
-
-在聊天模式下：
-- `memory` — 查看当前记忆状态
-- `clear` — 清空短期记忆（开始新对话）
-
-## 扩展 MCP 工具
-
-在 `main()` 中添加 MCP 服务器配置：
-
-```python
-mcp_servers = [
-    # 文件系统
-    {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users\\YourName"]},
-    # 自定义 Python MCP Server
-    {"command": "python", "args": ["-m", "my_mcp_server"]},
-]
-```
-
-## 扩展 Skills
-
-在 `skills/` 目录添加 JSON 文件，格式：
-
-```json
-{
-  "tools": [
-    {
-      "name": "my_skill_tool",
-      "description": "描述",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "param": {"type": "string"}
-        },
-        "required": ["param"]
-      }
-    }
-  ]
-}
-```
-
-## 架构
-
-```
-Agent.run()  →  LLM 调用 →  有工具调用？
-                    ↓ 是          ↓ 是
-                纯文本回复    执行工具 → 结果回传 LLM
-                    ↓ 否          ↓
-                  返回结果      (循环)
-                              ↓ 结束
-                    提取事实 → 保存到长期记忆
-                              ↓
-                    清空短期记忆
-```
-
-## 使用代码嵌入
+## 代码调用
 
 ```python
 import asyncio
 from agent import Agent
 
 async def main():
-    agent = Agent(model="claude-sonnet-4-5-20250929")
+    agent = Agent()
     await agent.init_tools()
-    result = await agent.run("帮我列出当前目录的文件并计算 2**10")
+    result = await agent.run("列出当前目录文件")
     print(result)
 
 asyncio.run(main())
-```
-
-## 文件结构
-
-```
-F:\HNS\
-├── agent.py          # 智能体核心（含记忆系统）
-├── .config           # API 配置（不提交 git）
-├── .config.example   # 配置模板
-├── .agent_memory/    # 长期记忆存储（自动生成）
-│   └── long_term.json
-└── .gitignore        # 排除配置和记忆文件
 ```
