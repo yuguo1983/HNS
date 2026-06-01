@@ -167,18 +167,30 @@ class Memory:
                       f"{len(self.long_term.get('preferences', []))} 条偏好{Style.RESET_ALL}")
             except Exception as e:
                 print(f"  [!] 长期记忆加载失败: {e}")
+
+        # 初始化时间戳（仅首次创建时）
+        now = datetime.now().isoformat()
         if self.long_term.get("created_at") is None:
-            self.long_term["created_at"] = self.long_term["updated_at"]
+            self.long_term["created_at"] = now
+        if self.long_term.get("updated_at") is None:
+            self.long_term["updated_at"] = now
+
+        # 保存前备份当前文件
         mem_file = self.storage_path / "long_term.json"
         mem_file.parent.mkdir(parents=True, exist_ok=True)
-        # 保存前备份当前文件
         if mem_file.exists():
             backup_dir = self.storage_path / "backups"
             backup_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_file = backup_dir / f"long_term_{ts}.json"
-            # 避免同一秒重复保存覆盖
             backup_file.write_text(mem_file.read_text(encoding="utf-8"), encoding="utf-8")
+        self._save_long_term()
+
+    def _save_long_term(self):
+        """保存长期记忆到磁盘"""
+        mem_file = self.storage_path / "long_term.json"
+        mem_file.parent.mkdir(parents=True, exist_ok=True)
+        self.long_term["updated_at"] = datetime.now().isoformat()
         mem_file.write_text(json.dumps(self.long_term, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _load_backups(self) -> list[dict]:
@@ -216,7 +228,7 @@ class Memory:
         self.long_term = snap["data"]
         self.long_term["updated_at"] = datetime.now().isoformat()
         self.short_term.clear()
-        self.save_long_term()
+        self._save_long_term()
         return self.get_status()
 
     def add_to_short_term(self, role: str, content):
@@ -551,14 +563,111 @@ def _register(name):
 
 
 @_register("web_search")
-def handle_web_search(q):
+async def handle_web_search(q):
+    """多引擎搜索：Bing(国内) → DuckDuckGo(国外) 自动备选"""
+    import urllib.request, urllib.parse
+    import ssl
+    import asyncio
+
+    # 清理 SSL 上下文，避免部分站点证书问题
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36"
+    }
+    q_enc = urllib.parse.quote(q)
+
+    def _fetch(url):
+        req = urllib.request.Request(url, headers=headers)
+        r = urllib.request.urlopen(req, timeout=15, context=ssl_ctx)
+        return r.read().decode("utf-8", errors="replace")
+
+    engines = [
+        # 引擎1: Bing (国内可访问)
+        {
+            "name": "Bing",
+            "url": f"https://cn.bing.com/search?q={q_enc}",
+            "parse": lambda html: _extract_bing(html),
+        },
+        # 引擎2: DuckDuckGo (国外备选)
+        {
+            "name": "DuckDuckGo",
+            "url": f"https://html.duckduckgo.com/html/?q={q_enc}",
+            "parse": lambda html: _extract_ddg(html),
+        },
+    ]
+
+    # 用 run_in_executor 避免阻塞事件循环
+    loop = asyncio.get_event_loop()
+
+    for engine in engines:
+        try:
+            if engine["name"] == "DuckDuckGo":
+                # 给 DuckDuckGo 额外 2 秒 (国内可能更慢)
+                pass
+            html = await loop.run_in_executor(None, _fetch, engine["url"])
+            result = engine["parse"](html)
+            if len(result) > 50:  # 有实质内容才返回
+                return f"🔍 [{engine['name']}] 搜索结果：\n\n{result[:3000]}"
+        except Exception as e:
+            continue  # 引擎失败，自动切到下一个
+
+    # 所有引擎都失败
+    # 最后一次尝试：直接返回 DuckDuckGo 原始错误信息
     try:
-        import urllib.request, urllib.parse
-        q = urllib.parse.quote(q)
-        r = urllib.request.urlopen(f"https://html.duckduckgo.com/html/?q={q}", timeout=15)
-        return r.read().decode("utf-8")[:2000]
+        html = await loop.run_in_executor(None, _fetch, engines[-1]["url"])
+        return _extract_ddg(html)[:3000]
     except Exception as e:
-        return f"搜索失败: {e}"
+        return f"搜索失败（所有引擎均不可用）: {e}"
+
+
+def _extract_bing(html):
+    """从 Bing 搜索结果页提取标题+摘要"""
+    import re
+    results = []
+    # Bing 搜索结果条目
+    items = re.findall(
+        r'<li class="b_algo">.*?<h2><a[^>]*href="([^"]*)"[^>]*>(.*?)</a></h2>'
+        r'.*?<p[^>]*>(.*?)</p>',
+        html, re.DOTALL
+    )
+    for url, title, snippet in items[:8]:
+        clean_title = re.sub(r'<[^>]+>', '', title).strip()
+        clean_snippet = re.sub(r'<[^>]+>', '', snippet).strip()
+        results.append(f"  • {clean_title}\n    {clean_snippet}\n    {url}")
+    if results:
+        return "\n\n".join(results)
+    # 备选: 提取所有 <a> 标签
+    fallback = re.findall(r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL)
+    lines = []
+    for url, title in fallback[:10]:
+        t = re.sub(r'<[^>]+>', '', title).strip()
+        if t:
+            lines.append(f"  • {t}\n    {url}")
+    return "\n\n".join(lines) if lines else html[:2000]
+
+
+def _extract_ddg(html):
+    """从 DuckDuckGo 搜索结果页提取标题+摘要"""
+    import re
+    results = re.findall(
+        r'<a rel="nofollow" class="result__a" href="([^"]*)".*?>(.*?)</a>'
+        r'.*?<a class="result__snippet".*?>(.*?)</a>',
+        html, re.DOTALL
+    )
+    lines = []
+    for url, title, snippet in results[:8]:
+        clean_title = re.sub(r'<[^>]+>', '', title).strip()
+        clean_snippet = re.sub(r'<[^>]+>', '', snippet).strip()
+        lines.append(f"  • {clean_title}\n    {clean_snippet}\n    {url}")
+    if lines:
+        return "\n\n".join(lines)
+    # 备选: 原始 HTML 截取
+    return html[:2000]
 
 
 @_register("read_file")
@@ -1190,7 +1299,7 @@ class Agent:
                     )
                     if extracted:
                         print(f"  {s['ok']}🧠 新增 {len(extracted)} 条长期事实{s['reset']}")
-                    self.memory.save_long_term()
+                    self.memory._save_long_term()
                     self.logger.info(f"长期记忆已保存 ({len(extracted)} 条新事实)")
                     print(f"  {s['info']}💾 长期记忆已保存{s['reset']}")
 
@@ -1217,7 +1326,10 @@ class Agent:
                     try:
                         handler = TOOL_HANDLERS.get(tool_name)
                         if handler:
-                            result = handler(**tool_input) if tool_input else handler()
+                            if asyncio.iscoroutinefunction(handler):
+                                result = await handler(**tool_input) if tool_input else await handler()
+                            else:
+                                result = handler(**tool_input) if tool_input else handler()
                         else:
                             result = f"[MCP/Skills 工具 {tool_name} 已调用]"
                     except Exception as e:
@@ -1290,6 +1402,15 @@ class Agent:
             print(f"\n  {s['dim']}已取消回退{s['reset']}")
 
     @staticmethod
+    def _redraw_line(buf, pos):
+        """从光标位置重绘到行尾（清除可能的残留字符）"""
+        import sys
+        remaining = ''.join(buf[pos:])
+        # 写剩余字符 + 清尾空格 + 退回光标
+        sys.stdout.write(remaining + ' ' + '\b' * (len(remaining) + 1))
+        sys.stdout.flush()
+
+    @staticmethod
     def _show_commands():
         """显示所有 / 命令列表（带编号）"""
         s = Agent._style()
@@ -1310,69 +1431,134 @@ class Agent:
 
     @staticmethod
     def _read_input():
-        """逐字符读取输入，/ → 编号选择 → 直接执行"""
-        import msvcrt
+        """读取用户输入，支持 / 快捷命令"""
         import sys
+        import msvcrt
 
         s = Agent._style()
-
-        # 编号 → 命令映射
         SELECTIONS = {
-            '1': '/quit',
-            '2': '/clear',
-            '3': '/memory',
-            '4': '/rollback',
-            '5': '/swarm ',
-            '6': '/help',
+            '1': '/quit', '2': '/clear', '3': '/memory',
+            '4': '/rollback', '5': '/swarm ', '6': '/help',
         }
 
-        buf = []
-        sys.stdout.write(f"\n{s['user']}你: {s['reset']}")
-        sys.stdout.flush()
-        while True:
-            ch = msvcrt.getwch()
-            if ch == '\r':  # Enter
-                print()
-                break
-            if ch in ('\b', '\x7f'):  # Backspace
-                if buf:
-                    buf.pop()
-                    sys.stdout.write('\b \b')
-                    sys.stdout.flush()
-                continue
-            if ch == '\x03':  # Ctrl+C
-                raise KeyboardInterrupt
+        # 检测是否为真实 Windows 控制台（可用 msvcrt）
+        is_console = sys.stdin.isatty()
 
-            buf.append(ch)
-            sys.stdout.write(ch)
+        if not is_console:
+            # Claude Code 等环境，用标准 input()
+            print(f"\n{s['user']}你: {s['reset']}", end="")
             sys.stdout.flush()
-
-            # 刚输入 / 就立即显示编号列表并等待选择
-            if ch == '/' and len(buf) == 1:
-                print()
+            line = sys.stdin.readline()
+            if not line:
+                return ""
+            line = line.strip()
+            if line == "/":
                 Agent._show_commands()
-                sys.stdout.write(f"{s['user']}你: /{s['reset']}")
+                print(f"  输入编号或直接输入内容继续...")
+                print(f"\n{s['user']}你: {s['reset']}", end="")
                 sys.stdout.flush()
-                # 读下一个按键
-                sel = msvcrt.getwch()
-                if sel in SELECTIONS:
-                    cmd = SELECTIONS[sel]
-                    # 显示后续输入
-                    rest = cmd[1:]  # 去掉开头的 /
-                    sys.stdout.write(rest)
-                    sys.stdout.flush()
-                    if cmd == '/swarm ':
-                        # swarm 需要用户继续输入目标
-                        buf.append('s')
-                        buf.append('w')
-                        buf.append('a')
-                        buf.append('r')
-                        buf.append('m')
-                        buf.append(' ')
-                        continue
-                    # 直接返回选中的命令
+                sel = sys.stdin.readline()
+                if sel and sel.strip() in SELECTIONS:
+                    return SELECTIONS[sel.strip()]
+                return ""
+            return line
+
+        # 原生 Windows 控制台，用 msvcrt 逐字读取
+        buf = []
+        pos = 0
+        print(f"\n{s['user']}你: {s['reset']}", end="")
+        sys.stdout.flush()
+
+        try:
+            while True:
+                ch = msvcrt.getwch()
+
+                if ch == '\r':  # Enter
                     print()
-                    return cmd
+                    break
+
+                if ch in ('\b', '\x7f'):  # Backspace
+                    if pos > 0:
+                        pos -= 1
+                        buf.pop(pos)
+                        sys.stdout.write('\b \b')
+                        Agent._redraw_line(buf, pos)
+                    continue
+
+                if ch == '\x03':
+                    raise KeyboardInterrupt
+
+                if ch == '\xe0':  # 方向键
+                    ch2 = msvcrt.getwch()
+                    if ch2 == 'K' and pos > 0:
+                        pos -= 1
+                        sys.stdout.write('\b')
+                        sys.stdout.flush()
+                    elif ch2 == 'M' and pos < len(buf):
+                        pos += 1
+                        sys.stdout.write(buf[pos - 1])
+                        sys.stdout.flush()
+                    elif ch2 == 'H':
+                        while pos > 0:
+                            pos -= 1
+                            sys.stdout.write('\b')
+                        sys.stdout.flush()
+                    elif ch2 == 'F':
+                        while pos < len(buf):
+                            sys.stdout.write(buf[pos])
+                            pos += 1
+                        sys.stdout.flush()
+                    elif ch2 == 'S':
+                        if pos < len(buf):
+                            buf.pop(pos)
+                            Agent._redraw_line(buf, pos)
+                    continue
+
+                # 输入 / 时立即显示菜单（无需回车）
+                if ch == '/' and len(buf) == 0:
+                    print()
+                    Agent._show_commands()
+                    print(f"\n{s['user']}你: /{s['reset']}", end="")
+                    sys.stdout.flush()
+                    sel = msvcrt.getwch()
+                    if sel in SELECTIONS:
+                        cmd = SELECTIONS[sel]
+                        sys.stdout.write(cmd[1:])
+                        sys.stdout.flush()
+                        if cmd == '/swarm ':
+                            buf = list(cmd)
+                            pos = len(buf)
+                            continue
+                        print()
+                        return cmd
+                    # 无效选择，继续输入
+                    continue
+
+                # Tab 键自动补全命令
+                if ch in ('\t', '\x00'):
+                    if len(buf) > 0 and buf[0] == '/':
+                        prefix = ''.join(buf)
+                        matches = [cmd for cmd in SELECTIONS.values() if cmd.startswith(prefix)]
+                        if len(matches) == 1:
+                            match = matches[0]
+                            # 退格清除当前输入
+                            for _ in range(len(buf)):
+                                sys.stdout.write('\b \b')
+                            sys.stdout.flush()
+                            buf = list(match)
+                            pos = len(buf)
+                            sys.stdout.write(match)
+                            sys.stdout.flush()
+                    continue
+
+                buf.insert(pos, ch)
+                pos += 1
+                sys.stdout.write(ch)
+                sys.stdout.flush()
+
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return ""
 
         return ''.join(buf)
 
@@ -1391,7 +1577,7 @@ class Agent:
                     print(f"  {s['ok']}🧠 退出提取: 新增 {len(extracted)} 条事实{s['reset']}")
 
             # 保存长期记忆
-            self.memory.save_long_term()
+            self.memory._save_long_term()
             self.logger.info("退出时保存记忆")
 
             # 生成情景摘要并保存短期记忆快照
@@ -1466,6 +1652,17 @@ class Agent:
 
     async def chat(self, servers: Optional[list[dict]] = None, skill_dir: str = "skills"):
         """交互式聊天模式"""
+        # 确保控制台启用 QuickEdit 模式（右键复制/粘贴）
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            h = kernel32.GetStdHandle(-10)
+            mode = ctypes.c_uint32()
+            kernel32.GetConsoleMode(h, ctypes.byref(mode))
+            kernel32.SetConsoleMode(h, mode.value | 0x0080 | 0x0040)
+        except Exception:
+            pass
+
         s = Agent._style()
         await self.init_tools(servers, skill_dir)
 
