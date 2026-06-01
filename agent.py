@@ -1560,7 +1560,7 @@ class Agent:
 
         return ''.join(buf)
 
-    def _save_on_exit(self):
+    async def _save_on_exit(self):
         """退出聊天时保存长期记忆和情景摘要"""
         s = Agent._style()
         if not self.memory.short_term:
@@ -1579,11 +1579,11 @@ class Agent:
             self.logger.info("退出时保存记忆")
 
             # 生成情景摘要并保存短期记忆快照
-            self._save_episodic_and_snapshot()
+            await self._save_episodic_and_snapshot()
         except Exception as e:
             print(f"  {s['err']}⚠ 退出保存记忆失败: {e}{s['reset']}")
 
-    def _save_episodic_and_snapshot(self):
+    async def _save_episodic_and_snapshot(self):
         """保存情景摘要 + 短期记忆快照到磁盘"""
         short_term_file = self.memory.storage_path / "short_term_snapshot.json"
         try:
@@ -1683,7 +1683,7 @@ class Agent:
                 user_input = self._read_input().strip()
             except (EOFError, KeyboardInterrupt):
                 print()
-                self._save_on_exit()
+                await self._save_on_exit()
                 print(f"  {s['ok']}再见！{s['reset']}")
                 self.logger.close()
                 break
@@ -1694,7 +1694,7 @@ class Agent:
             cmd = user_input.lower().lstrip("/")
 
             if cmd in ("quit",):
-                self._save_on_exit()
+                await self._save_on_exit()
                 print(f"  {s['ok']}再见！{s['reset']}")
                 self.logger.close()
                 break
