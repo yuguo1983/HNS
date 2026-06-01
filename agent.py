@@ -235,13 +235,13 @@ class Memory:
         """添加短期记忆（对话历史）"""
         self.short_term.append({"role": role, "content": content})
 
-    def summarize_recent(self, messages: list, llm_client, model: str) -> str:
+    async def summarize_recent(self, messages: list, llm_client, model: str) -> str:
         """
         使用 LLM 对最近对话进行摘要，释放上下文空间
         返回摘要文本，用于压缩历史
         """
         try:
-            resp = llm_client.messages.create(
+            resp = await llm_client.messages.create(
                 model=model,
                 messages=[
                     {"role": "user", "content": (
@@ -268,10 +268,10 @@ class Memory:
             print(f"  [!] 摘要生成失败: {e}")
             return ""
 
-    def extract_facts(self, messages: list, llm_client, model: str) -> list:
+    async def extract_facts(self, messages: list, llm_client, model: str) -> list:
         """从对话中提取重要事实和偏好，存入长期记忆"""
         try:
-            resp = llm_client.messages.create(
+            resp = await llm_client.messages.create(
                 model=model,
                 messages=[
                     {"role": "user", "content": (
@@ -1283,16 +1283,16 @@ class Agent:
             # 模型完成回复
             if resp.stop_reason == "end_turn":
                 self.memory.add_to_short_term("assistant", partial_text)
-                print(f"  {s['ai']}━" * 10)
+                print(f"  {s['ai']}━" * 20)
                 print(f"  {s['ai']}🤖  Denny Agent  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
-                print(f"  {s['ai']}━" * 10)
+                print(f"  {s['ai']}━" * 20)
                 for line in partial_text.split('\n'):
                     print(f"  {line}")
                 print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
                 self.logger.ai_response(partial_text)
 
                 if len(self.memory.short_term) >= 10:
-                    extracted = self.memory.extract_facts(
+                    extracted = await self.memory.extract_facts(
                         self.memory.short_term, self.client, self.model
                     )
                     if extracted:
@@ -1315,11 +1315,11 @@ class Agent:
                 for block in tool_blocks:
                     tool_name = block.name
                     tool_input = block.input or {}
-                    print(f"  {s['tool']}━" * 10)
+                    print(f"  {s['tool']}━" * 20)
                     print(f"  {s['tool']}🔧  {tool_name}{s['reset']}")
                     if tool_input:
                         print(f"  {s['dim']}{json.dumps(tool_input, ensure_ascii=False)}{s['reset']}")
-                    print(f"  {s['tool']}━" * 10)
+                    print(f"  {s['tool']}━" * 20)
 
                     try:
                         handler = TOOL_HANDLERS.get(tool_name)
@@ -1568,7 +1568,7 @@ class Agent:
         try:
             # 提取事实（如果短期消息足够多）
             if len(self.memory.short_term) >= 6:
-                extracted = self.memory.extract_facts(
+                extracted = await self.memory.extract_facts(
                     self.memory.short_term, self.client, self.model
                 )
                 if extracted:
@@ -1601,7 +1601,7 @@ class Agent:
 
             # 生成情景记忆摘要
             if len(self.memory.short_term) >= 4:
-                summary = self.memory.summarize_recent(
+                summary = await self.memory.summarize_recent(
                     self.memory.short_term[-4:], self.client, self.model
                 )
                 if summary and len(summary) > 10:
