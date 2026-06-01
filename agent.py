@@ -1283,9 +1283,9 @@ class Agent:
             # 模型完成回复
             if resp.stop_reason == "end_turn":
                 self.memory.add_to_short_term("assistant", partial_text)
-                print(f"\n  {s['ai']}━" * 20)
+                print(f"  {s['ai']}━" * 10)
                 print(f"  {s['ai']}🤖  Denny Agent  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
-                print(f"  {s['ai']}━" * 20)
+                print(f"  {s['ai']}━" * 10)
                 for line in partial_text.split('\n'):
                     print(f"  {line}")
                 print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
@@ -1315,11 +1315,11 @@ class Agent:
                 for block in tool_blocks:
                     tool_name = block.name
                     tool_input = block.input or {}
-                    print(f"\n  {s['tool']}━" * 20)
+                    print(f"  {s['tool']}━" * 10)
                     print(f"  {s['tool']}🔧  {tool_name}{s['reset']}")
                     if tool_input:
                         print(f"  {s['dim']}{json.dumps(tool_input, ensure_ascii=False)}{s['reset']}")
-                    print(f"  {s['tool']}━" * 20)
+                    print(f"  {s['tool']}━" * 10)
 
                     try:
                         handler = TOOL_HANDLERS.get(tool_name)
