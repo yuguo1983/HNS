@@ -269,12 +269,9 @@ class Memory:
             return ""
 
     def extract_facts(self, messages: list, llm_client, model: str) -> list:
-        """
-        从对话中提取重要事实和偏好，存入长期记忆
-        """
+        """从对话中提取重要事实和偏好，存入长期记忆"""
         try:
             resp = llm_client.messages.create(
-                model=model,
                 messages=[
                     {"role": "user", "content": (
                         "请从以下对话中提取重要的事实、用户偏好或知识。"
@@ -1446,7 +1443,7 @@ class Agent:
 
         if not is_console:
             # Claude Code 等环境，用标准 input()
-            print(f"\n{s['user']}你: {s['reset']}", end="")
+            print(f"\n{s['user']}> {s['reset']}", end="")
             sys.stdout.flush()
             line = sys.stdin.readline()
             if not line:
@@ -1455,7 +1452,7 @@ class Agent:
             if line == "/":
                 Agent._show_commands()
                 print(f"  输入编号或直接输入内容继续...")
-                print(f"\n{s['user']}你: {s['reset']}", end="")
+                print(f"\n{s['user']}>{s['reset']}", end="")
                 sys.stdout.flush()
                 sel = sys.stdin.readline()
                 if sel and sel.strip() in SELECTIONS:
@@ -1466,7 +1463,7 @@ class Agent:
         # 原生 Windows 控制台，用 msvcrt 逐字读取
         buf = []
         pos = 0
-        print(f"\n{s['user']}你: {s['reset']}", end="")
+        print(f"\n{s['user']}> {s['reset']}", end="")
         sys.stdout.flush()
 
         try:
