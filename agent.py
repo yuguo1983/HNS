@@ -272,6 +272,7 @@ class Memory:
         """从对话中提取重要事实和偏好，存入长期记忆"""
         try:
             resp = llm_client.messages.create(
+                model=model,
                 messages=[
                     {"role": "user", "content": (
                         "请从以下对话中提取重要的事实、用户偏好或知识。"
