@@ -255,7 +255,8 @@ class Memory:
                 ],
                 max_tokens=500,
             )
-            summary = resp.content[0].text if resp.content else "(摘要生成失败)"
+            text_blocks = [b.text for b in resp.content if hasattr(b, 'text')]
+            summary = text_blocks[0] if text_blocks else "(摘要生成失败)"
             self.episodic.append({
                 "timestamp": datetime.now().isoformat(),
                 "summary": summary,
@@ -286,7 +287,8 @@ class Memory:
                 ],
                 max_tokens=1000,
             )
-            text = resp.content[0].text if resp.content else "[]"
+            text_blocks = [b.text for b in resp.content if hasattr(b, 'text')]
+            text = text_blocks[0] if text_blocks else "[]"
             # 尝试解析 JSON
             import re
             json_match = re.search(r'\[.*\]', text, re.DOTALL)
