@@ -1,0 +1,4 @@
+{
+  "ANTHROPIC_API_KEY": "你的实际 API Key",
+  "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
+}

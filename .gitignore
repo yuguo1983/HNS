@@ -1,0 +1,7 @@
+.env
+.config
+*.env.*
+!*.env.example
+__pycache__/
+*.pyc
+.agent_memory/

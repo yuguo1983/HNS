@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show *)",
+      "Bash(pyinstaller --onefile --name agent --hidden-import PIL --hidden-import rembg --hidden-import PIL.Image --hidden-import PIL.ImageEnhance --hidden-import PIL.ImageOps --clean --noconfirm agent.py)",
+      "Bash(dir agent.exe)",
+      "Bash(pyinstaller --onefile --name agent --hidden-import PIL --hidden-import PIL.Image --hidden-import PIL.ImageEnhance --hidden-import PIL.ImageOps --clean --noconfirm agent.py)",
+      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -Command \"[Environment]::GetEnvironmentVariable\\('PATH', 'User'\\)\")",
+      "Bash(%SystemRoot%\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe *)",
+      "Bash(/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe *)",
+      "Bash(printf @echo off\\\\r\\\\nsetlocal\\\\r\\\\nset \"AGENT_DIR=%%~dp0\"\\\\r\\\\nif \"%%AGENT_DIR:~-1%%\"==\"\\\\\\\\\" set \"AGENT_DIR=%%AGENT_DIR:~0,-1%%\"\\\\r\\\\nset \"PS=%%SystemRoot%%\\\\\\\\System32\\\\\\\\WindowsPowerShell\\\\\\\\v1.0\\\\\\\\powershell.exe\"\\\\r\\\\n%%PS%% -NoProfile -ExecutionPolicy Bypass -Command \"$d='%%AGENT_DIR%%';$c=[Environment]::GetEnvironmentVariable\\('PATH','User'\\);if\\(!$c\\){$c=''};if\\($c-split';'|?{$_-eq$d}\\){Write-Host '[已存在] 路径已在PATH中'}else{$n=$d+';'+$c;[Environment]::SetEnvironmentVariable\\('PATH',$n,'User'\\);Write-Host '[成功] 已添加:'$d};Write-Host '';Write-Host '现在可以新开CMD窗口运行: agent'\"\\\\r\\\\npause\\\\r\\\\n *)",
+      "Bash(xxd \"F:\\\\\\\\HNS\\\\\\\\dist\\\\\\\\setup_path.bat\")",
+      "Bash(grep *)",
+      "Bash(printf '@echo off\\\\r\\\\nsetlocal\\\\r\\\\nset \"AGENT_DIR=%%~dp0\"\\\\r\\\\nif \"%%AGENT_DIR:~-1%%\"==\"\\\\\\\\\" set \"AGENT_DIR=%%AGENT_DIR:~0,-1%%\"\\\\r\\\\nset \"PSFILE=%%AGENT_DIR%%\\\\\\\\setup_path.ps1\"\\\\r\\\\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%%PSFILE%%\"\\\\r\\\\npause\\\\r\\\\n')",
+      "Bash(printf $agentDir = Split-Path -Parent $MyInvocation.MyCommand.Path\\\\r\\\\nWrite-Host \"============================================\"\\\\r\\\\nWrite-Host \"  Denny Agent - 注册到系统 PATH\"\\\\r\\\\nWrite-Host \"============================================\"\\\\r\\\\nWrite-Host \"\"\\\\r\\\\nWrite-Host \"  目标路径: $agentDir\"\\\\r\\\\nWrite-Host \"\"\\\\r\\\\n$current = [Environment]::GetEnvironmentVariable\\(\"PATH\", \"User\"\\)\\\\r\\\\nif \\(-not $current\\) { $current = \"\" }\\\\r\\\\n$parts = $current -split \";\" | Where-Object { $_ -ne \"\" }\\\\r\\\\nif \\($parts -contains $agentDir\\) {\\\\r\\\\n    Write-Host \"[已存在] 该路径已在用户 PATH 中\"\\\\r\\\\n} else {\\\\r\\\\n    $newPath = \"$agentDir;$current\"\\\\r\\\\n    [Environment]::SetEnvironmentVariable\\(\"PATH\", $newPath, \"User\"\\)\\\\r\\\\n    Write-Host \"[成功] 已添加: $agentDir\"\\\\r\\\\n}\\\\r\\\\nWrite-Host \"\"\\\\r\\\\nWrite-Host \"现在可以新开 CMD 窗口运行: agent\"\\\\r\\\\nWrite-Host \"============================================\"\\\\r\\\\n *)",
+      "Bash(python *)",
+      "Bash(gh pr *)",
+      "Bash(./agent.exe)",
+      "Bash(rm -rf build dist __pycache__)",
+      "Bash(pyinstaller agent.spec)",
+      "Bash(gh auth *)",
+      "Bash(curl *)",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ]
+  }
+}
