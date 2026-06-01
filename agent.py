@@ -18,6 +18,13 @@ from anthropic import AsyncAnthropic
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
+# ── 终端美化 ──────────────────────────────────────────────
+from colorama import init, Fore, Style
+init()  # Windows 终端 ANSI 支持
+
+# Swarm 多Agent协作（延迟导入，避免循环依赖）
+# from swarm_agent import OrchestratorAgent  # 在 chat() 中按需导入
+
 
 # ── 加载 .config 配置文件 ──────────────────────────────
 def _load_config(path: str = ".config"):
@@ -43,17 +50,90 @@ def _load_config(path: str = ".config"):
         data = json.loads(config_path.read_text(encoding="utf-8"))
         for k, v in data.items():
             os.environ[k] = str(v)
-        print(f"[+] 配置已加载: {list(data.keys())} (来源: {config_path})")
+        print(f"  {Style.DIM}[+] 配置已加载: {list(data.keys())} (来源: {config_path}){Style.RESET_ALL}")
     else:
-        print(f"[!] 未找到 .config 配置文件，将使用环境变量或默认值")
+        print(f"  {Style.DIM}[!] 未找到 .config 配置文件，将使用环境变量或默认值{Style.RESET_ALL}")
 
 
 _load_config()
 
 
 # ═══════════════════════════════════════════════════════
-#  记忆系统 - Memory System
+#  操作日志 - Operation Logger
 # ═══════════════════════════════════════════════════════
+
+class OperationLog:
+    """
+    每一次操作的日志记录器。
+    写入 .agent_memory/operations/ 目录，按日期分文件。
+    """
+    def __init__(self, storage_path: str = ".agent_memory"):
+        self.log_dir = Path(storage_path) / "operations"
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self._today = None
+        self._handle = None
+
+    def _get_file(self):
+        """每天一个日志文件"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today != self._today:
+            if self._handle:
+                self._handle.close()
+            self._today = today
+            log_file = self.log_dir / f"operations_{today}.log"
+            self._handle = open(log_file, "a", encoding="utf-8")
+        return self._handle
+
+    def _write(self, level: str, message: str):
+        """写入一行日志"""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        fh = self._get_file()
+        fh.write(f"[{ts}] [{level}] {message}\n")
+        fh.flush()
+
+    def user_input(self, text: str):
+        """记录用户输入"""
+        self._write("USER", text)
+
+    def ai_response(self, text: str, cost: str = ""):
+        """记录 AI 回复"""
+        preview = text[:200].replace("\n", "\\n")
+        if len(text) > 200:
+            preview += "..."
+        self._write("AI", f"{preview} {cost}")
+
+    def tool_call(self, name: str, args: dict, result: str):
+        """记录工具调用"""
+        args_str = json.dumps(args, ensure_ascii=False)[:300]
+        result_preview = str(result)[:200].replace("\n", "\\n")
+        if len(str(result)) > 200:
+            result_preview += "..."
+        self._write("TOOL", f"{name}({args_str}) → {result_preview}")
+
+    def command(self, cmd: str, detail: str = ""):
+        """记录命令操作"""
+        self._write("CMD", f"{cmd} {detail}")
+
+    def info(self, message: str):
+        """记录系统信息"""
+        self._write("INFO", message)
+
+    def error(self, message: str):
+        """记录错误"""
+        self._write("ERROR", message)
+
+    def swarm(self, goal: str, result: str):
+        """记录 Swarm 多Agent协作"""
+        result_preview = result[:300].replace("\n", "\\n")
+        if len(result) > 300:
+            result_preview += "..."
+        self._write("SWARM", f"目标: {goal} → {result_preview}")
+
+    def close(self):
+        """关闭日志文件"""
+        if self._handle:
+            self._handle.close()
+            self._handle = None
 
 class Memory:
     """
@@ -83,19 +163,61 @@ class Memory:
             try:
                 data = json.loads(mem_file.read_text(encoding="utf-8"))
                 self.long_term.update(data)
-                print(f"  📖 加载长期记忆: {len(self.long_term.get('facts', []))} 条事实, "
-                      f"{len(self.long_term.get('preferences', []))} 条偏好")
+                print(f"  {Style.DIM}[记忆] 加载长期记忆: {len(self.long_term.get('facts', []))} 条事实, "
+                      f"{len(self.long_term.get('preferences', []))} 条偏好{Style.RESET_ALL}")
             except Exception as e:
                 print(f"  [!] 长期记忆加载失败: {e}")
-
-    def save_long_term(self):
-        """持久化长期记忆"""
-        self.long_term["updated_at"] = datetime.now().isoformat()
         if self.long_term.get("created_at") is None:
             self.long_term["created_at"] = self.long_term["updated_at"]
         mem_file = self.storage_path / "long_term.json"
         mem_file.parent.mkdir(parents=True, exist_ok=True)
+        # 保存前备份当前文件
+        if mem_file.exists():
+            backup_dir = self.storage_path / "backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_file = backup_dir / f"long_term_{ts}.json"
+            # 避免同一秒重复保存覆盖
+            backup_file.write_text(mem_file.read_text(encoding="utf-8"), encoding="utf-8")
         mem_file.write_text(json.dumps(self.long_term, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _load_backups(self) -> list[dict]:
+        """列出所有快照备份（按时间倒序）"""
+        backup_dir = self.storage_path / "backups"
+        if not backup_dir.exists():
+            return []
+        backups = []
+        for f in sorted(backup_dir.glob("long_term_*.json"), reverse=True):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                facts = len(data.get("facts", []))
+                prefs = len(data.get("preferences", []))
+                updated = data.get("updated_at", "?")
+                backups.append({
+                    "filename": f.name,
+                    "time": updated,
+                    "facts": facts,
+                    "preferences": prefs,
+                    "data": data,
+                })
+            except Exception:
+                continue
+        return backups
+
+    def rollback(self, index: int) -> dict:
+        """
+        回退到指定索引的快照，恢复后清空短期记忆并重载。
+        返回新 long_term 的状态。
+        """
+        backups = self._load_backups()
+        if index < 0 or index >= len(backups):
+            raise ValueError(f"索引 {index} 无效，有效范围 0-{len(backups)-1}")
+        snap = backups[index]
+        self.long_term = snap["data"]
+        self.long_term["updated_at"] = datetime.now().isoformat()
+        self.short_term.clear()
+        self.save_long_term()
+        return self.get_status()
 
     def add_to_short_term(self, role: str, content):
         """添加短期记忆（对话历史）"""
@@ -963,6 +1085,8 @@ class Agent:
         self.model = model or os.getenv("ANTHROPIC_MODEL", "deepseek-v4-flash")
         # 初始化记忆系统
         self.memory = Memory()
+        # 初始化操作日志
+        self.logger = OperationLog()
         # 构建系统提示词（含长期记忆上下文）
         self._build_system_prompt()
         # 短期对话历史
@@ -983,6 +1107,30 @@ class Agent:
             base += f"\n\n--- 长期记忆 ---\n{ctx}"
         self.system_prompt = base
 
+    @staticmethod
+    def _style():
+        """返回终端样式字典"""
+        return {
+            'ai': Fore.GREEN,
+            'user': Fore.CYAN,
+            'tool': Fore.YELLOW,
+            'info': Fore.LIGHTBLUE_EX,
+            'ok': Fore.LIGHTGREEN_EX,
+            'warn': Fore.LIGHTYELLOW_EX,
+            'err': Fore.LIGHTRED_EX + Style.BRIGHT,
+            'dim': Style.DIM,
+            'bright': Style.BRIGHT,
+            'reset': Style.RESET_ALL,
+        }
+
+    @staticmethod
+    def _box(text, color, width=60):
+        """用分隔线和颜色包裹文本"""
+        s = Agent._style()
+        line = "─" * width
+        c = color + s['bright'] if color != Fore.GREEN else color
+        return f"  {c}{line}{s['reset']}\n  {color}{text}{s['reset']}\n  {c}{line}"
+
     async def init_tools(self, servers: Optional[list[dict]] = None, skill_dir: str = "skills"):
         """初始化工具集：内置 + MCP + Skills"""
         self.all_tools = list(TOOLS)
@@ -996,12 +1144,19 @@ class Agent:
         skills = load_skills(skill_dir)
         self.all_tools.extend(skills)
 
-        print(f"[+] 总工具: {len(self.all_tools)} (内置 {len(TOOLS)} + MCP {mcp_count} + Skills {len(skills)})")
+        print(f"  {'─' * 35}")
+        s = Agent._style()
+        print(f"  {s['info']}  工具数: {len(self.all_tools)}{s['reset']}")
+        print(f"  {s['dim']}  ├─ 内置: {len(TOOLS)}{s['reset']}")
+        print(f"  {s['dim']}  ├─ MCP:  {mcp_count}{s['reset']}")
+        print(f"  {s['dim']}  └─ 技能:  {len(skills)}{s['reset']}")
+        print(f"  {s['dim']}└─────────────────────────────────────┘{s['reset']}")
 
     async def run(self, user_input: str) -> str:
         """执行单轮对话（含工具调用循环 + 记忆管理）"""
         self.memory.add_to_short_term("user", user_input)
-        print(f"\n📝 短期记忆: 已有 {len(self.memory.short_term)} 条消息")
+        s = Agent._style()
+        self.logger.user_input(user_input)
 
         max_iter = 30
 
@@ -1021,16 +1176,23 @@ class Agent:
             # 模型完成回复
             if resp.stop_reason == "end_turn":
                 self.memory.add_to_short_term("assistant", partial_text)
-                print(f"\n{'='*50}\n🤖 Agent: {partial_text}\n{'='*50}")
+                print(f"\n  {s['ai']}━" * 40)
+                print(f"  {s['ai']}🤖  Denny Agent  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
+                print(f"  {s['ai']}━" * 40)
+                for line in partial_text.split('\n'):
+                    print(f"  {line}")
+                print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
+                self.logger.ai_response(partial_text)
 
                 if len(self.memory.short_term) >= 10:
                     extracted = self.memory.extract_facts(
                         self.memory.short_term, self.client, self.model
                     )
                     if extracted:
-                        print(f"  💡 记忆提取: 新增 {len(extracted)} 条")
+                        print(f"  {s['ok']}🧠 新增 {len(extracted)} 条长期事实{s['reset']}")
                     self.memory.save_long_term()
-                    print(f"  💾 长期记忆已保存")
+                    self.logger.info(f"长期记忆已保存 ({len(extracted)} 条新事实)")
+                    print(f"  {s['info']}💾 长期记忆已保存{s['reset']}")
 
                 return partial_text
 
@@ -1046,7 +1208,11 @@ class Agent:
                 for block in tool_blocks:
                     tool_name = block.name
                     tool_input = block.input or {}
-                    print(f"\n🔧 {tool_name}({json.dumps(tool_input, ensure_ascii=False)})")
+                    print(f"\n  {s['tool']}━" * 40)
+                    print(f"  {s['tool']}🔧  {tool_name}{s['reset']}")
+                    if tool_input:
+                        print(f"  {s['dim']}{json.dumps(tool_input, ensure_ascii=False)}{s['reset']}")
+                    print(f"  {s['tool']}━" * 40)
 
                     try:
                         handler = TOOL_HANDLERS.get(tool_name)
@@ -1056,6 +1222,8 @@ class Agent:
                             result = f"[MCP/Skills 工具 {tool_name} 已调用]"
                     except Exception as e:
                         result = f"[错误] {e}"
+
+                    self.logger.tool_call(tool_name, tool_input, result)
 
                     tool_results.append({
                         "type": "tool_result",
@@ -1070,7 +1238,7 @@ class Agent:
             # max_tokens 截断：保存已生成的文本，让模型继续补全
             if resp.stop_reason == "max_tokens":
                 self.memory.add_to_short_term("assistant", partial_text)
-                print(f"\n📝 输出超长已截断，继续补全...")
+                print(f"\n  {s['warn']}📝 输出超长，继续补全...{s['reset']}")
                 # 用 user 消息触发继续生成
                 self.memory.add_to_short_term("user", "请继续完成上面未完成的内容，不要重复已输出的部分，直接从截断处继续。")
                 continue
@@ -1079,49 +1247,420 @@ class Agent:
 
         return "[超出最大迭代次数]"
 
+    def _handle_rollback(self):
+        """处理记忆回退：展示快照列表，让用户选择恢复哪个版本"""
+        s = Agent._style()
+        backups = self.memory._load_backups()
+        if not backups:
+            print(f"\n  {s['err']}⚠ 没有找到历史快照，无法回退。{s['reset']}")
+            print(f"  {s['dim']}提示: 每次自动保存长期记忆时都会生成快照。{s['reset']}")
+            return
+        print(f"\n  {s['info']}📋 历史快照（共 {len(backups)} 个，按时间倒序）:{s['reset']}")
+        print(f"  {s['dim']}{'─' * 56}{s['reset']}")
+        print(f"  {s['dim']}{'[0]':>6s}  当前记忆{s['reset']} ({datetime.now().strftime('%m-%d %H:%M')}, "
+              f"{self.memory.long_term.get('updated_at', '?')[:19]}, "
+              f"{s['ok']}{len(self.memory.long_term.get('facts', []))}事实/{len(self.memory.long_term.get('preferences', []))}偏好{s['reset']})")
+        for i, snap in enumerate(backups, 1):
+            print(f"  {s['dim']}[{i:>3d}]  {snap['time'][:19]}  "
+                  f"{snap['facts']}事实/{snap['preferences']}偏好{s['reset']}")
+        print(f"  {s['dim']}{'─' * 56}{s['reset']}")
+        print(f"  输入编号回退到该版本（{s['dim']}0{s['reset']} 取消）:")
+        try:
+            import msvcrt
+            while True:
+                ch = msvcrt.getwch()
+                if ch == '\r':
+                    print()
+                    return
+                if ch == '0':
+                    print()
+                    print(f"  {s['dim']}已取消回退{s['reset']}")
+                    return
+                if ch in [str(i) for i in range(1, len(backups)+1)]:
+                    print(ch)
+                    idx = int(ch) - 1
+                    snap = backups[idx]
+                    ts = snap['time'][:19]
+                    self.memory.rollback(idx)
+                    self._build_system_prompt()
+                    self.logger.command("rollback", f"回退到快照 {idx} ({ts})")
+                    print(f"  {s['ok']}✅ 已回退到 {ts} 的快照（短期记忆已清空）{s['reset']}")
+                    return
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n  {s['dim']}已取消回退{s['reset']}")
+
+    @staticmethod
+    def _show_commands():
+        """显示所有 / 命令列表（带编号）"""
+        s = Agent._style()
+        print(f"\n  {s['info']}📋 可用命令:{s['reset']}")
+        print(f"  {s['dim']}{'─' * 56}{s['reset']}")
+        cmds = [
+            ("/quit", "退出程序"),
+            ("/clear", "清空当前对话"),
+            ("/memory", "查看记忆状态"),
+            ("/rollback", "回退长期记忆到之前某个版本"),
+            ("/swarm <目标>", "多Agent协作"),
+            ("/help", "显示此帮助"),
+        ]
+        for i, (cmd, desc) in enumerate(cmds, 1):
+            print(f"  [{s['info']}{i}{s['reset']}] {s['user']}{cmd:20s}{s['reset']} {desc}")
+        print(f"  {s['dim']}[其他键] 继续手动输入{s['reset']}")
+        print(f"  {s['dim']}{'─' * 56}{s['reset']}")
+
+    @staticmethod
+    def _read_input():
+        """逐字符读取输入，/ → 编号选择 → 直接执行"""
+        import msvcrt
+        import sys
+
+        s = Agent._style()
+
+        # 编号 → 命令映射
+        SELECTIONS = {
+            '1': '/quit',
+            '2': '/clear',
+            '3': '/memory',
+            '4': '/rollback',
+            '5': '/swarm ',
+            '6': '/help',
+        }
+
+        buf = []
+        sys.stdout.write(f"\n{s['user']}你: {s['reset']}")
+        sys.stdout.flush()
+        while True:
+            ch = msvcrt.getwch()
+            if ch == '\r':  # Enter
+                print()
+                break
+            if ch in ('\b', '\x7f'):  # Backspace
+                if buf:
+                    buf.pop()
+                    sys.stdout.write('\b \b')
+                    sys.stdout.flush()
+                continue
+            if ch == '\x03':  # Ctrl+C
+                raise KeyboardInterrupt
+
+            buf.append(ch)
+            sys.stdout.write(ch)
+            sys.stdout.flush()
+
+            # 刚输入 / 就立即显示编号列表并等待选择
+            if ch == '/' and len(buf) == 1:
+                print()
+                Agent._show_commands()
+                sys.stdout.write(f"{s['user']}你: /{s['reset']}")
+                sys.stdout.flush()
+                # 读下一个按键
+                sel = msvcrt.getwch()
+                if sel in SELECTIONS:
+                    cmd = SELECTIONS[sel]
+                    # 显示后续输入
+                    rest = cmd[1:]  # 去掉开头的 /
+                    sys.stdout.write(rest)
+                    sys.stdout.flush()
+                    if cmd == '/swarm ':
+                        # swarm 需要用户继续输入目标
+                        buf.append('s')
+                        buf.append('w')
+                        buf.append('a')
+                        buf.append('r')
+                        buf.append('m')
+                        buf.append(' ')
+                        continue
+                    # 直接返回选中的命令
+                    print()
+                    return cmd
+
+        return ''.join(buf)
+
+    def _save_on_exit(self):
+        """退出聊天时保存长期记忆和情景摘要"""
+        s = Agent._style()
+        if not self.memory.short_term:
+            return
+        try:
+            # 提取事实（如果短期消息足够多）
+            if len(self.memory.short_term) >= 6:
+                extracted = self.memory.extract_facts(
+                    self.memory.short_term, self.client, self.model
+                )
+                if extracted:
+                    print(f"  {s['ok']}🧠 退出提取: 新增 {len(extracted)} 条事实{s['reset']}")
+
+            # 保存长期记忆
+            self.memory.save_long_term()
+            self.logger.info("退出时保存记忆")
+
+            # 生成情景摘要并保存短期记忆快照
+            self._save_episodic_and_snapshot()
+        except Exception as e:
+            print(f"  {s['err']}⚠ 退出保存记忆失败: {e}{s['reset']}")
+
+    def _save_episodic_and_snapshot(self):
+        """保存情景摘要 + 短期记忆快照到磁盘"""
+        short_term_file = self.memory.storage_path / "short_term_snapshot.json"
+        try:
+            # 保存短期记忆快照（最新 20 条）
+            snapshot = self.memory.short_term[-20:] if self.memory.short_term else []
+            if snapshot:
+                short_term_file.write_text(
+                    json.dumps(snapshot, ensure_ascii=False, indent=2),
+                    encoding="utf-8"
+                )
+            else:
+                # 文件存在但无内容就删除
+                if short_term_file.exists():
+                    short_term_file.unlink()
+
+            # 生成情景记忆摘要
+            if len(self.memory.short_term) >= 4:
+                summary = self.memory.summarize_recent(
+                    self.memory.short_term[-4:], self.client, self.model
+                )
+                if summary and len(summary) > 10:
+                    self.memory.episodic.append({
+                        "timestamp": datetime.now().isoformat()[:19],
+                        "summary": summary,
+                    })
+                    # 只保留最近 5 条
+                    if len(self.memory.episodic) > 5:
+                        self.memory.episodic = self.memory.episodic[-5:]
+
+            # 持久化情景记忆
+            epi_file = self.memory.storage_path / "episodic.json"
+            epi_file.write_text(
+                json.dumps(self.memory.episodic, ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+            self.logger.info("情景摘要和短期快照已保存")
+        except Exception as e:
+            self.logger.error(f"保存情景摘要失败: {e}")
+
+    def _load_short_term_snapshot(self):
+        """开机时加载短期记忆快照"""
+        s = Agent._style()
+        short_term_file = self.memory.storage_path / "short_term_snapshot.json"
+        if short_term_file.exists():
+            try:
+                data = json.loads(short_term_file.read_text(encoding="utf-8"))
+                if isinstance(data, list) and len(data) > 0:
+                    self.memory.short_term = data
+                    print(f"  {s['info']}📂 载入上次会话的 {len(data)} 条短期记忆{s['reset']}")
+            except Exception:
+                pass
+
+    def _load_episodic(self):
+        """开机时加载情景记忆"""
+        epi_file = self.memory.storage_path / "episodic.json"
+        if epi_file.exists():
+            try:
+                data = json.loads(epi_file.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    self.memory.episodic = data
+                    self.logger.info(f"加载 {len(data)} 条情景记忆")
+            except Exception:
+                pass
+
     async def chat(self, servers: Optional[list[dict]] = None, skill_dir: str = "skills"):
         """交互式聊天模式"""
+        s = Agent._style()
         await self.init_tools(servers, skill_dir)
-        print("\n🚀 Denny Agent 就绪")
-        print("   输入 'quit' 退出 | 'clear' 清空对话 | 'memory' 查看记忆状态")
+
+        # 开机恢复记忆
+        self._load_short_term_snapshot()
+        self._load_episodic()
+        if self.memory.short_term:
+            self._build_system_prompt()  # 重建含短期上下文的系统提示
+            print(f"\n  {s['ok']}✅ 恢复了上次会话 ({len(self.memory.short_term)} 条消息, "
+                  f"{len(self.memory.long_term.get('facts', []))} 条事实, "
+                  f"{len(self.memory.long_term.get('preferences', []))} 条偏好){s['reset']}")
+            print(f"  {s['dim']}   输入 /clear 可清空历史重新开始{s['reset']}")
+        else:
+            print(f"\n  {s['info']}🔹 Denny Agent 就绪 ({len(self.memory.long_term.get('facts', []))} 条长期事实){s['reset']}")
+
+        print(f"  {s['dim']}   输入 /quit 退出 | /clear 清空 | /memory 查看记忆 | /help 查看所有命令{s['reset']}")
 
         while True:
             try:
-                user_input = input("\n你: ").strip()
+                user_input = self._read_input().strip()
             except (EOFError, KeyboardInterrupt):
-                print("\n再见！")
+                print()
+                self._save_on_exit()
+                print(f"  {s['ok']}再见！{s['reset']}")
+                self.logger.close()
                 break
 
             if not user_input:
                 continue
-            if user_input.lower() == "quit":
-                print("再见！")
+            # 带 / 前缀的命令处理
+            cmd = user_input.lower().lstrip("/")
+
+            if cmd in ("quit",):
+                self._save_on_exit()
+                print(f"  {s['ok']}再见！{s['reset']}")
+                self.logger.close()
                 break
-            if user_input.lower() == "clear":
+            if cmd in ("clear",):
                 self.memory.clear_short_term()
                 self._build_system_prompt()
-                print("对话已清空")
+                self.logger.command("clear")
+                print(f"  {s['info']}🗑 对话已清空{s['reset']}")
                 continue
-            if user_input.lower() == "memory":
+            if cmd in ("memory",):
                 status = self.memory.get_status()
-                print(f"\n📊 记忆状态:")
+                print(f"\n  {s['info']}📋 记忆状态:{s['reset']}")
+                print(f"  {s['dim']}{'─' * 40}{s['reset']}")
                 for k, v in status.items():
-                    print(f"   • {k}: {v}")
+                    label = k.replace('_', ' ').capitalize()
+                    print(f"  {s['user']}{label:20s}{s['reset']} {v}")
+                self.logger.command("memory")
+                continue
+            if cmd in ("rollback",):
+                self._handle_rollback()
+                continue
+            if cmd in ("help",):
+                self.logger.command("help")
+                print(f"\n  {s['info']}📋 命令列表:{s['reset']}")
+                print(f"  {s['dim']}{'─' * 40}{s['reset']}")
+                print(f"  {s['user']}/quit{'':12s}{s['reset']}  退出程序")
+                print(f"  {s['user']}/clear{'':12s}{s['reset']}  清空当前对话")
+                print(f"  {s['user']}/memory{'':12s}{s['reset']} 查看记忆状态")
+                print(f"  {s['user']}/swarm{'':12s}{s['reset']} 多Agent协作（如: /swarm 分析项目结构）")
+                print(f"  {s['user']}/rollback{'':12s}{s['reset']}回退长期记忆")
+                print(f"  {s['user']}/help{'':12s}{s['reset']}  显示此帮助")
+                continue
+
+            if cmd.startswith("swarm "):
+                goal = cmd[6:].strip()
+                if not goal:
+                    print(f"  {s['warn']}用法: /swarm <你的目标>{s['reset']}")
+                    print(f"  {s['dim']}示例: /swarm 帮我分析这个项目并生成一个README{s['reset']}")
+                    continue
+                self.logger.command("swarm", goal)
+                from swarm_agent import OrchestratorAgent
+                orchestrator = OrchestratorAgent(
+                    model=self.model,
+                    api_key=self.client.api_key,
+                )
+                try:
+                    result = await orchestrator.orchestrate(goal)
+                    print(f"\n  {s['ai']}━" * 40)
+                    print(f"  {s['ai']}🧩  Swarm 最终整合结果  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
+                    print(f"  {s['ai']}━" * 40)
+                    print(f"  {result}")
+                    print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
+                    self.logger.swarm(goal, result)
+                except Exception as e:
+                    print(f"  {s['err']}⚠ Swarm 错误: {e}{s['reset']}")
+                    self.logger.error(f"swarm 错误: {e}")
+                    import traceback
+                    traceback.print_exc()
+                continue
+
+            # 输入以 / 开头但不匹配已知命令
+            if user_input.startswith("/"):
+                Agent._show_commands()
                 continue
 
             try:
                 await self.run(user_input)
             except Exception as e:
+                self.logger.error(f"chat执行异常: {e}")
                 print(f"[!] 错误: {e}")
 
 
 # ── 入口 ────────────────────────────────────────────────
+def _parse_args():
+    """解析命令行参数"""
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="agent",
+        description="Denny Agent — 单文件 AI 助手，支持交互式聊天、单次问答、多 Agent 协作",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+使用示例:
+  python agent.py                        启动交互式聊天
+  python agent.py -q "分析一下这个项目"    单次问答
+  python agent.py -p < file.txt          从管道读取输入
+  python agent.py swarm "做一份周报"      多 Agent 协作
+  python agent.py --version              显示版本号
+        """,
+    )
+    parser.add_argument("--query", "-q", type=str, help="单次问答模式：直接提问，输出回复后退出")
+    parser.add_argument("--pipe", "-p", action="store_true",
+                        help="管道模式：从 stdin 读取内容作为问题（适用于重定向/管道）")
+    parser.add_argument("--version", "-v", action="store_true", help="显示版本号并退出")
+    parser.add_argument("swarm", nargs="*", help="多 Agent 协作模式: python agent.py swarm \"你的目标\"")
+
+    # 解析前：先检查 swarm 子命令（argparse 会把 swarm 之后的参数当 nargs 吃掉）
+    import sys
+    args, remaining = parser.parse_known_args()
+
+    # 如果第一个位置参数是 swarm，重写解析方式
+    if len(sys.argv) >= 2 and sys.argv[1] == "swarm":
+        goal = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
+        args.swarm_goal = goal
+        args.swarm_mode = True
+    else:
+        args.swarm_mode = bool(args.swarm)
+        args.swarm_goal = " ".join(args.swarm) if args.swarm else ""
+
+    return args
+
+
 async def main():
-    # MCP 服务器配置（按需取消注释并添加）
+    args = _parse_args()
+
+    # --version
+    if args.version:
+        s = Agent._style()
+        print(f"  {s['info']}Denny Agent v1.0{s['reset']}")
+        print(f"  {s['dim']}模型: deepseek-v4-flash{s['reset']}")
+        print(f"  {s['dim']}平台: 单文件 AI 助手 + MCP + 技能系统 + 三层记忆{s['reset']}")
+        return
+
+    # swarm 模式
+    if args.swarm_mode:
+        if not args.swarm_goal:
+            print("  [错误] swarm 模式需要指定目标。示例: python agent.py swarm \"做一份周报\"")
+            return
+        from swarm_agent import OrchestratorAgent
+        orchestrator = OrchestratorAgent()
+        result = await orchestrator.orchestrate(args.swarm_goal)
+        s = Agent._style()
+        print(f"\n  {s['ai']}━" * 40)
+        print(f"  {s['ai']}🧩  Swarm 最终整合结果{s['reset']}")
+        print(f"  {s['ai']}━" * 40)
+        print(f"  {result}")
+        print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
+        return
+
+    # --pipe 模式：从 stdin 读取
+    if args.pipe:
+        import sys
+        pipe_input = sys.stdin.read().strip()
+        if not pipe_input:
+            print("  [错误] 管道模式未检测到输入。示例: cat file.txt | python agent.py -p")
+            return
+        agent = Agent()
+        result = await agent.run(pipe_input)
+        print(f"\n[回复] {result}")
+        return
+
+    # --query 模式：单次问答
+    if args.query:
+        agent = Agent()
+        result = await agent.run(args.query)
+        print(f"\n[回复] {result}")
+        return
+
+    # 默认：交互式聊天
     mcp_servers = [
         # {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]},
     ]
-
     agent = Agent()
     await agent.chat(servers=mcp_servers)
 
