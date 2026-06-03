@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build *)",
+      "Bash(ls -la target/debug/*.exe)",
+      "Bash(ls -la target/release/*.exe)",
+      "Bash(taskkill /F /IM ymodem_sender.exe)",
+      "Bash(taskkill //F //IM ymodem_sender.exe)",
+      "Bash(powershell *)"
+    ]
+  }
+}
