@@ -1,17 +1,4 @@
-# ==================== 主程序依赖 ====================
 anthropic>=0.30.0
 mcp>=1.0.0
 colorama>=0.4.6
 pyserial>=3.5
-wcwidth>=0.2.6
-
-# ==================== Skills 依赖 ====================
-# camera skill - 摄像头控制
-# image_analysis skill - 图像分析
-opencv-python>=4.0.0
-
-# image_analysis skill - 图像处理
-Pillow>=10.0.0
-
-# image_analysis skill - OCR 文字识别
-pytesseract>=0.3.0
