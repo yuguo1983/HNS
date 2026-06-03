@@ -351,6 +351,18 @@ TOOLS = [
         }
     },
     {
+        "name": "weather",
+        "description": "查询指定城市的实时天气信息，包括温度、湿度、风力等",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string", "description": "城市名称或拼音"},
+                "province": {"type": "string", "description": "省份（可选，用于更精确查询）"}
+            },
+            "required": ["city"]
+        }
+    },
+    {
         "name": "read_file",
         "description": "读取指定路径文件的内容",
         "input_schema": {
@@ -1118,6 +1130,49 @@ def handle_embedded_doc(query):
     return f"未找到匹配 '{query}' 的函数。可用: {', '.join(_EMBEDDED_FUNCTIONS.keys())}"
 
 
+@_register("weather")
+def handle_weather(city, province=None):
+    """查询天气（使用免费wttr.in API）"""
+    try:
+        import urllib.request
+        import urllib.parse
+        import json
+
+        location = city if not province else f"{province}/{city}"
+        url = f"https://wttr.in/{urllib.parse.quote(location)}?format=j1"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        current = data.get("current_condition", [{}])[0]
+        weather_desc = current.get("weatherDesc", [{}])[0].get("value", "未知")
+
+        if not data.get("weather"):
+            return f"未查到 {city} 的天气数据"
+
+        lines = [f"🌤️  {city} 天气预报", f"{'─' * 30}"]
+        for i, day in enumerate(data.get("weather", [])[:3]):
+            date = day.get("date", "")
+            max_temp = day.get("maxtempC", "N/A")
+            min_temp = day.get("mintempC", "N/A")
+            desc = day.get("hourly", [{}])[0].get("weatherDesc", [{}])
+            desc = desc[0].get("value", "未知") if desc else "未知"
+            if i == 0:
+                avg_humidity = current.get("humidity", "N/A")
+                wind = current.get("windspeedKmph", "N/A")
+                lines.append(f"今天 ({date})")
+                lines.append(f"  天气: {weather_desc}")
+                lines.append(f"  温度: {min_temp}°C ~ {max_temp}°C")
+                lines.append(f"  湿度: {avg_humidity}%")
+                lines.append(f"  风速: {wind} km/h")
+            else:
+                lines.append(f"{date}")
+                lines.append(f"  {desc}, {min_temp}°C ~ {max_temp}°C")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"查询失败: {e}"
+
+
 # ── MCP & Skills 加载 ─────────────────────────────────
 async def load_mcp_tools(servers: list[dict]) -> list[dict]:
     """动态加载 MCP 工具"""
@@ -1270,6 +1325,7 @@ class Agent:
         max_iter = 30
 
         for _ in range(max_iter):
+            print(f"  {s['dim']}🤔 THINKING...{s['reset']}")
             resp = await self.client.messages.create(
                 model=self.model,
                 system=self.system_prompt,
@@ -1314,6 +1370,7 @@ class Agent:
                 self.memory.add_to_short_term("assistant", assistant_content)
 
                 tool_results = []
+                print(f"  {s['tool']}🔧 TOOLS...{s['reset']}")
                 for block in tool_blocks:
                     tool_name = block.name
                     tool_input = block.input or {}
@@ -1485,10 +1542,11 @@ class Agent:
                         Agent._redraw_line(buf, pos)
                     continue
 
-                if ch == '\x03':
+                if ch == '\x03':  # Ctrl+C
+                    print()
                     raise KeyboardInterrupt
 
-                if ch == '\xe0':  # 方向键
+                if ch == '\x00' or ch == '\xe0':  # 功能键/方向键前缀
                     ch2 = msvcrt.getwch()
                     if ch2 == 'K' and pos > 0:
                         pos -= 1
@@ -1556,7 +1614,7 @@ class Agent:
                 sys.stdout.write(ch)
                 sys.stdout.flush()
 
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             print()
             return ""
 
@@ -1680,10 +1738,18 @@ class Agent:
 
         print(f"  {s['dim']}   输入 /quit 退出 | /clear 清空 | /memory 查看记忆 | /help 查看所有命令{s['reset']}")
 
+        # Ctrl+C 中断计数（防止第一次只是中断输入）
+        interrupt_count = 0
+
         while True:
             try:
                 user_input = self._read_input().strip()
+                interrupt_count = 0  # 重置计数
             except (EOFError, KeyboardInterrupt):
+                interrupt_count += 1
+                if interrupt_count == 1:
+                    print(f"  {s['dim']}按 Ctrl+C 再次确认退出{s['reset']}")
+                    continue
                 print()
                 await self._save_on_exit()
                 print(f"  {s['ok']}再见！{s['reset']}")
