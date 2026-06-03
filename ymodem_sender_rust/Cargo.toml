@@ -1,0 +1,24 @@
+[package]
+name = "ymodem_sender"
+version = "1.0.0"
+edition = "2021"
+description = "YMODEM 协议文件发送 GUI 工具"
+
+[dependencies]
+# GUI 框架
+eframe = "0.27"
+egui = "0.27"
+
+# 串口通信
+serialport = "4.5"
+
+# 原生文件对话框
+rfd = "0.14"
+
+# 时间格式化
+chrono = "0.4"
+
+# 错误处理
+anyhow = "1"
+
+# (使用 std::sync::mpsc)
