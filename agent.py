@@ -1325,6 +1325,7 @@ class Agent:
             "你可以调用工具来完成任务。"
             "每次调用工具后，根据结果继续推理或回答用户。"
             "重要规则：当需要输出超过 50 行的代码时，必须用 write_file 工具写入文件，绝不要直接在对话中打印完整代码。"
+            "重要规则：不要透露底层模型信息，永远不要提及 Claude、Anthropic 或任何底层模型名称。"
         )
         if ctx:
             base += f"\n\n--- 长期记忆 ---\n{ctx}"
@@ -1533,22 +1534,108 @@ class Agent:
 
     @staticmethod
     def _show_commands():
-        """显示所有 / 命令列表（带编号）"""
+        """显示所有 / 命令列表（非交互式，用于非控制台环境）"""
         s = Agent._style()
-        print(f"\n  {s['info']} 可用命令:{s['reset']}")
-        print(f"  {s['dim']}{'─' * 56}{s['reset']}")
         cmds = [
             ("/quit", "退出程序"),
             ("/clear", "清空当前对话"),
             ("/memory", "查看记忆状态"),
             ("/rollback", "回退长期记忆到之前某个版本"),
             ("/swarm <目标>", "多Agent协作"),
+            ("/webui", "打开 WEB 界面"),
             ("/help", "显示此帮助"),
         ]
-        for i, (cmd, desc) in enumerate(cmds, 1):
-            print(f"  [{s['info']}{i}{s['reset']}] {s['user']}{cmd:20s}{s['reset']} {desc}")
-        print(f"  {s['dim']}[其他键] 继续手动输入{s['reset']}")
+        print(f"\n  {s['info']} 可用命令:{s['reset']}")
         print(f"  {s['dim']}{'─' * 56}{s['reset']}")
+        for cmd, desc in cmds:
+            print(f"  {s['user']}{cmd:20s}{s['reset']} {desc}")
+        print(f"  {s['dim']}{'─' * 56}{s['reset']}")
+
+    @staticmethod
+    def _command_menu() -> str:
+        """交互式命令选择菜单：↑↓选择 Enter确认 Esc取消  选中项黄色高亮"""
+        import sys
+        import msvcrt
+
+        s = Agent._style()
+        cmds = [
+            ("/quit", "退出程序"),
+            ("/clear", "清空当前对话"),
+            ("/memory", "查看记忆状态"),
+            ("/rollback", "回退长期记忆到之前某个版本"),
+            ("/swarm <目标>", "多Agent协作"),
+            ("/webui", "打开 WEB 界面"),
+            ("/help", "显示此帮助"),
+        ]
+        RET = {
+            "/quit": "/quit",
+            "/clear": "/clear",
+            "/memory": "/memory",
+            "/rollback": "/rollback",
+            "/swarm <目标>": "/swarm ",
+            "/webui": "/webui",
+            "/help": "/help",
+        }
+        n = len(cmds)
+        sel = 0
+
+        def item_str(i: int, selected: bool) -> str:
+            cmd, desc = cmds[i]
+            prefix = "▸ " if selected else "  "
+            ac = s['tool'] if selected else s['dim']
+            cc = s['tool'] if selected else s['user']
+            return f"  {ac}{prefix}{s['reset']}{cc}{cmd:20s}{s['reset']} {desc}"
+
+        # ── 初始渲染 ──
+        print(f"  {s['dim']}{'─' * 56}{s['reset']}")
+        for i in range(n):
+            print(item_str(i, i == 0))
+        print(f"  {s['dim']}{'─' * 56}{s['reset']}")
+        print(f"  {s['dim']}↑↓ 选择  Enter 确认  Esc 取消{s['reset']}")
+
+        # 移回 item 0 行首（跳过 instruction + footer + render 中的最后 n-1 项）
+        sys.stdout.write(f"\033[{n + 2}A\r")
+        sys.stdout.flush()
+
+        while True:
+            ch = msvcrt.getwch()
+
+            if ch == '\r':  # Enter — 确认选择
+                cmd_ret = RET[cmds[sel][0]]
+                sys.stdout.write(f"\033[{sel}A\r")   # 回到 item 0 行首
+                sys.stdout.write(f"\033[J")            # 清除到屏幕底部
+                sys.stdout.flush()
+                print(f"  {s['user']}你: {cmd_ret}{s['reset']}", end="")
+                sys.stdout.flush()
+                return cmd_ret
+
+            if ch == '\x1b':  # Esc — 取消
+                sys.stdout.write(f"\033[{sel}A\r")
+                sys.stdout.write(f"\033[J")
+                sys.stdout.flush()
+                return ""
+
+            if ch == '\xe0':  # 方向键
+                ch2 = msvcrt.getwch()
+                old = sel
+                if ch2 == 'H':   # ↑
+                    sel = (sel - 1) % n
+                elif ch2 == 'P':  # ↓
+                    sel = (sel + 1) % n
+                else:
+                    continue
+                if sel == old:
+                    continue
+
+                # 回退到 item 0 行并重绘所有项
+                sys.stdout.write(f"\033[{old}A\r")   # 从当前位置回到 item 0
+                for i in range(n):
+                    sys.stdout.write(f"\033[J")       # 清除行尾残留
+                    print(item_str(i, i == sel))
+                # 光标在 footer 行。回到 item 0 再下移到当前选中
+                sys.stdout.write(f"\033[{n}A")        # 从 footer 回到 item 0
+                sys.stdout.write(f"\033[{sel}B\r")    # 到当前选中行
+                sys.stdout.flush()
 
     @staticmethod
     def _read_input():
@@ -1557,13 +1644,9 @@ class Agent:
         import msvcrt
 
         s = Agent._style()
-        SELECTIONS = {
-            '1': '/quit', '2': '/clear', '3': '/memory',
-            '4': '/rollback', '5': '/swarm ', '6': '/help',
-        }
 
         # 检测是否为真实 Windows 控制台（可用 msvcrt）
-        is_console = sys.stdin.isatty()
+        is_console = sys.stdin is not None and sys.stdin.isatty()
 
         if not is_console:
             # Claude Code 等环境，用标准 input()
@@ -1575,12 +1658,12 @@ class Agent:
             line = line.strip()
             if line == "/":
                 Agent._show_commands()
-                print(f"  输入编号或直接输入内容继续...")
+                print(f"  输入完整命令继续...")
                 print(f"\n{s['user']}>{s['reset']}", end="")
                 sys.stdout.flush()
                 sel = sys.stdin.readline()
-                if sel and sel.strip() in SELECTIONS:
-                    return SELECTIONS[sel.strip()]
+                if sel and sel.strip() in ("/quit", "/clear", "/memory", "/rollback", "/swarm", "/webui", "/help"):
+                    return sel.strip()
                 return ""
             return line
 
@@ -1639,31 +1722,26 @@ class Agent:
                             Agent._redraw_line(buf, pos)
                     continue
 
-                # 输入 / 时立即显示菜单（无需回车）
+                # 输入 / 时显示交互式命令选择菜单（上下键选择，回车确认）
                 if ch == '/' and len(buf) == 0:
                     print()
-                    Agent._show_commands()
-                    print(f"\n{s['user']}你: /{s['reset']}", end="")
-                    sys.stdout.flush()
-                    sel = msvcrt.getwch()
-                    if sel in SELECTIONS:
-                        cmd = SELECTIONS[sel]
-                        sys.stdout.write(cmd[1:])
-                        sys.stdout.flush()
-                        if cmd == '/swarm ':
-                            buf = list(cmd)
-                            pos = len(buf)
-                            continue
-                        print()
-                        return cmd
-                    # 无效选择，继续输入
-                    continue
+                    result = Agent._command_menu()
+                    if result == "":
+                        continue  # Esc 取消
+                    if result == "/swarm ":
+                        buf = list(result)
+                        pos = len(buf)
+                        continue
+                    print()
+                    return result
 
                 # Tab 键自动补全命令
                 if ch in ('\t', '\x00'):
                     if len(buf) > 0 and buf[0] == '/':
                         prefix = ''.join(buf)
-                        matches = [cmd for cmd in SELECTIONS.values() if cmd.startswith(prefix)]
+                        matches = [c for c in
+                            ("/quit", "/clear", "/memory", "/rollback", "/swarm ", "/webui", "/help")
+                            if c.startswith(prefix)]
                         if len(matches) == 1:
                             match = matches[0]
                             # 退格清除当前输入（考虑显示宽度）
@@ -1880,10 +1958,52 @@ class Agent:
                 print(f"  {s['user']}/memory{'':12s}{s['reset']} 查看记忆状态")
                 print(f"  {s['user']}/swarm{'':12s}{s['reset']} 多Agent协作（如: /swarm 分析项目结构）")
                 print(f"  {s['user']}/rollback{'':12s}{s['reset']}回退长期记忆")
+                print(f"  {s['user']}/webui{'':12s}{s['reset']} 打开 WEB 界面")
                 print(f"  {s['user']}/help{'':12s}{s['reset']}  显示此帮助")
                 continue
 
-            if cmd.startswith("swarm "):
+            if cmd in ("webui",):
+                import socket
+                # 检查端口是否已占用
+                def is_port_open(host="127.0.0.1", port=8000):
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(1)
+                        result = s.connect_ex((host, port))
+                        s.close()
+                        return result == 0
+                    except Exception:
+                        return False
+
+                if not is_port_open():
+                    import subprocess
+                    import os
+                    # 启动 webui.py（后台进程）
+                    startupinfo = None
+                    if os.name == "nt":
+                        startupinfo = subprocess.STARTUPINFO()
+                        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                        startupinfo.wShowWindow = subprocess.SW_HIDE
+                    subprocess.Popen(
+                        [sys.executable, "webui.py"],
+                        cwd=str(Path.cwd()),
+                        startupinfo=startupinfo,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    import time
+                    for _ in range(15):
+                        time.sleep(0.5)
+                        if is_port_open():
+                            break
+                    print(f"  {s['ok']} 正在启动 WEB 服务...{s['reset']}")
+                import webbrowser
+                webbrowser.open("http://127.0.0.1:8000")
+                print(f"  {s['ok']} 已打开 WEB 界面 http://127.0.0.1:8000{s['reset']}")
+                self.logger.command("webui")
+                continue
+
+            if cmd == "swarm" or cmd.startswith("swarm "):
                 goal = cmd[6:].strip()
                 if not goal:
                     print(f"  {s['warn']}用法: /swarm <你的目标>{s['reset']}")
@@ -1910,8 +2030,9 @@ class Agent:
                     traceback.print_exc()
                 continue
 
-            # 输入以 / 开头但不匹配已知命令
+            # 输入以 / 开头但不匹配已知命令，显示帮助
             if user_input.startswith("/"):
+                print(f"  {s['dim']}未知命令: {user_input}{s['reset']}")
                 Agent._show_commands()
                 continue
 
