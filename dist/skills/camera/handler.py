@@ -1,3 +1,7 @@
+import sys
+# 确保能找到系统安装的第三方库
+sys.path.append(r"C:\Users\Administrator\AppData\Local\Programs\Python\Python311\Lib\site-packages")
+
 import cv2
 from datetime import datetime
 from pathlib import Path

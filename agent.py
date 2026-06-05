@@ -10,52 +10,48 @@ import time
 import asyncio
 import shutil
 import tempfile
-from typing import Optional
+import re
+from typing import Optional, Any, Callable, Dict, List
 from pathlib import Path
 from datetime import datetime, timedelta
+
+def sanitize_emoji(text: str) -> str:
+    """移除文本中的表情符号，防止 Windows 终端编码错误"""
+    emoji_pattern = re.compile(
+        r'[\U00010000-\U0010ffff]|[\u2600-\u26FF]|[\u2700-\u27BF]|[\u203C-\u2049]'
+    )
+    return emoji_pattern.sub('', text)
 
 from anthropic import AsyncAnthropic
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
-# ── 终端美化 ──────────────────────────────────────────────
-from colorama import init, Fore, Style
-init()  # Windows 终端 ANSI 支持
+from utils import (
+    TerminalStyle,
+    load_config,
+    validate_config,
+    content_block_to_dict,
+    clean_old_snapshots,
+    ensure_directory,
+    safe_json_loads,
+    extract_json,
+)
 
 # Swarm 多Agent协作（延迟导入，避免循环依赖）
 # from swarm_agent import OrchestratorAgent  # 在 chat() 中按需导入
 
 
 # ── 加载 .config 配置文件 ──────────────────────────────
-def _load_config(path: str = ".config"):
-    """读取 .config 文件，设置环境变量（优先 EXE 同目录，其次当前目录）"""
-    config_path = None
-    # 1. 优先找 EXE 所在目录下的 .config
-    try:
-        exe_dir = Path(__file__).resolve().parent
-        if getattr(sys, 'frozen', False):
-            exe_dir = Path(sys.executable).resolve().parent
-        candidate = exe_dir / path
-        if candidate.exists():
-            config_path = candidate
-    except Exception:
-        pass
-    # 2. 其次找当前工作目录下的 .config
-    if config_path is None:
-        cwd_candidate = Path.cwd() / path
-        if cwd_candidate.exists():
-            config_path = cwd_candidate
+config = load_config()
+# 无论验证是否通过，都设置环境变量（验证只是给出警告）
+for key, value in config.items():
+    if value:  # 只设置非空值
+        os.environ[key] = str(value)
 
-    if config_path and config_path.exists():
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        for k, v in data.items():
-            os.environ[k] = str(v)
-        print(f"  {Style.DIM}[+] 配置已加载: {list(data.keys())} (来源: {config_path}){Style.RESET_ALL}")
-    else:
-        print(f"  {Style.DIM}[!] 未找到 .config 配置文件，将使用环境变量或默认值{Style.RESET_ALL}")
-
-
-_load_config()
+is_valid, config_errors = validate_config(config)
+if not is_valid:
+    s = TerminalStyle.style()
+    print(f"  {s['warn']}[!] 配置警告: {', '.join(config_errors)}{s['reset']}")
 
 
 # ═══════════════════════════════════════════════════════
@@ -143,30 +139,39 @@ class Memory:
     3. 情景记忆 (Episodic): 最近对话的摘要，用于上下文回溯
     """
 
-    def __init__(self, storage_path: str = ".agent_memory"):
+    def __init__(self, storage_path: str = ".agent_memory", max_snapshots: int = 10):
         self.storage_path = Path(storage_path)
-        self.short_term: list = []          # 当前对话轮次
-        self.episodic: list = []            # 已结束的对话摘要
-        self.long_term = {                  # 持久化事实
-            "facts": [],                     # 提取的事实
-            "preferences": [],               # 用户偏好
-            "knowledge": {},                 # 领域知识
+        self.backup_dir = self.storage_path / "backups"
+        self.short_term: List[Dict[str, Any]] = []  # 当前对话轮次
+        self.episodic: List[Dict[str, Any]] = []    # 已结束的对话摘要
+        self.long_term = {  # 持久化事实
+            "facts": [],       # 提取的事实
+            "preferences": [], # 用户偏好
+            "knowledge": {},   # 领域知识
             "created_at": None,
             "updated_at": None,
         }
+        self.max_snapshots = max_snapshots
         self._load_long_term()
 
     def _load_long_term(self):
         """加载长期记忆"""
+        # 确保目录存在
+        ensure_directory(self.storage_path)
+        ensure_directory(self.backup_dir)
+
         mem_file = self.storage_path / "long_term.json"
         if mem_file.exists():
             try:
-                data = json.loads(mem_file.read_text(encoding="utf-8"))
-                self.long_term.update(data)
-                print(f"  {Style.DIM}[记忆] 加载长期记忆: {len(self.long_term.get('facts', []))} 条事实, "
-                      f"{len(self.long_term.get('preferences', []))} 条偏好{Style.RESET_ALL}")
+                data = safe_json_loads(mem_file.read_text(encoding="utf-8"), {})
+                if isinstance(data, dict):
+                    self.long_term.update(data)
+                    s = TerminalStyle.style()
+                    print(f"  {s['dim']}[记忆] 加载长期记忆: {len(self.long_term.get('facts', []))} 条事实, "
+                          f"{len(self.long_term.get('preferences', []))} 条偏好{s['reset']}")
             except Exception as e:
-                print(f"  [!] 长期记忆加载失败: {e}")
+                s = TerminalStyle.style()
+                print(f"  {s['warn']}[!] 长期记忆加载失败: {e}{s['reset']}")
 
         # 初始化时间戳（仅首次创建时）
         now = datetime.now().isoformat()
@@ -176,47 +181,48 @@ class Memory:
             self.long_term["updated_at"] = now
 
         # 保存前备份当前文件
-        mem_file = self.storage_path / "long_term.json"
-        mem_file.parent.mkdir(parents=True, exist_ok=True)
         if mem_file.exists():
-            backup_dir = self.storage_path / "backups"
-            backup_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_file = backup_dir / f"long_term_{ts}.json"
+            backup_file = self.backup_dir / f"long_term_{ts}.json"
             backup_file.write_text(mem_file.read_text(encoding="utf-8"), encoding="utf-8")
+            # 清理旧快照
+            deleted = clean_old_snapshots(self.backup_dir, self.max_snapshots)
+            if deleted > 0:
+                s = TerminalStyle.style()
+                print(f"  {s['dim']}[记忆] 清理了 {deleted} 个旧快照{s['reset']}")
         self._save_long_term()
 
     def _save_long_term(self):
         """保存长期记忆到磁盘"""
         mem_file = self.storage_path / "long_term.json"
-        mem_file.parent.mkdir(parents=True, exist_ok=True)
+        ensure_directory(mem_file.parent)
         self.long_term["updated_at"] = datetime.now().isoformat()
         mem_file.write_text(json.dumps(self.long_term, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def _load_backups(self) -> list[dict]:
+    def _load_backups(self) -> List[Dict[str, Any]]:
         """列出所有快照备份（按时间倒序）"""
-        backup_dir = self.storage_path / "backups"
-        if not backup_dir.exists():
+        if not self.backup_dir.exists():
             return []
         backups = []
-        for f in sorted(backup_dir.glob("long_term_*.json"), reverse=True):
+        for f in sorted(self.backup_dir.glob("long_term_*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                facts = len(data.get("facts", []))
-                prefs = len(data.get("preferences", []))
-                updated = data.get("updated_at", "?")
-                backups.append({
-                    "filename": f.name,
-                    "time": updated,
-                    "facts": facts,
-                    "preferences": prefs,
-                    "data": data,
-                })
+                data = safe_json_loads(f.read_text(encoding="utf-8"), {})
+                if isinstance(data, dict):
+                    facts = len(data.get("facts", []))
+                    prefs = len(data.get("preferences", []))
+                    updated = data.get("updated_at", "?")
+                    backups.append({
+                        "filename": f.name,
+                        "time": updated,
+                        "facts": facts,
+                        "preferences": prefs,
+                        "data": data,
+                    })
             except Exception:
                 continue
         return backups
 
-    def rollback(self, index: int) -> dict:
+    def rollback(self, index: int) -> Dict[str, Any]:
         """
         回退到指定索引的快照，恢复后清空短期记忆并重载。
         返回新 long_term 的状态。
@@ -231,11 +237,11 @@ class Memory:
         self._save_long_term()
         return self.get_status()
 
-    def add_to_short_term(self, role: str, content):
+    def add_to_short_term(self, role: str, content: Any):
         """添加短期记忆（对话历史）"""
         self.short_term.append({"role": role, "content": content})
 
-    async def summarize_recent(self, messages: list, llm_client, model: str) -> str:
+    async def summarize_recent(self, messages: List[Dict[str, Any]], llm_client, model: str) -> str:
         """
         使用 LLM 对最近对话进行摘要，释放上下文空间
         返回摘要文本，用于压缩历史
@@ -265,11 +271,14 @@ class Memory:
             # 只保留最近5条摘要
             self.episodic = self.episodic[-5:]
             return summary
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            print(f"  [!] 摘要生成失败: {e}")
+            s = TerminalStyle.style()
+            print(f"  {s['warn']}[!] 摘要生成失败: {e}{s['reset']}")
             return ""
 
-    async def extract_facts(self, messages: list, llm_client, model: str) -> list:
+    async def extract_facts(self, messages: List[Dict[str, Any]], llm_client, model: str) -> List[Dict[str, Any]]:
         """从对话中提取重要事实和偏好，存入长期记忆"""
         try:
             resp = await llm_client.messages.create(
@@ -290,24 +299,27 @@ class Memory:
             text_blocks = [b.text for b in resp.content if hasattr(b, 'text')]
             text = text_blocks[0] if text_blocks else "[]"
             # 尝试解析 JSON
-            import re
-            json_match = re.search(r'\[.*\]', text, re.DOTALL)
-            if json_match:
-                items = json.loads(json_match.group())
-                for item in items:
-                    if isinstance(item, dict) and "content" in item:
-                        key = item.get("type", "fact")
-                        content = item["content"]
-                        if key == "preference" and content not in self.long_term["preferences"]:
-                            self.long_term["preferences"].append(content)
-                        elif key == "fact" and content not in self.long_term["facts"]:
-                            self.long_term["facts"].append(content)
-                        else:
-                            # 视为一般知识
-                            self.long_term["knowledge"].update({content: True})
-                return items
+            json_text = extract_json(text)
+            if json_text:
+                items = safe_json_loads(json_text, [])
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict) and "content" in item:
+                            key = item.get("type", "fact")
+                            content_val = item["content"]
+                            if key == "preference" and content_val not in self.long_term["preferences"]:
+                                self.long_term["preferences"].append(content_val)
+                            elif key == "fact" and content_val not in self.long_term["facts"]:
+                                self.long_term["facts"].append(content_val)
+                            else:
+                                # 视为一般知识
+                                self.long_term["knowledge"][content_val] = True
+                    return items
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            print(f"  [!] 事实提取失败: {e}")
+            s = TerminalStyle.style()
+            print(f"  {s['warn']}[!] 事实提取失败: {e}{s['reset']}")
         return []
 
     def get_long_term_context(self) -> str:
@@ -327,7 +339,7 @@ class Memory:
         """清空短期记忆"""
         self.short_term.clear()
 
-    def get_status(self) -> dict:
+    def get_status(self) -> Dict[str, Any]:
         """获取记忆状态"""
         return {
             "short_term_messages": len(self.short_term),
@@ -338,7 +350,7 @@ class Memory:
 
 
 # ── 内置工具定义 ────────────────────────────────────────
-TOOLS = [
+TOOLS: List[Dict[str, Any]] = [
     {
         "name": "web_search",
         "description": "搜索互联网获取实时信息",
@@ -536,20 +548,11 @@ TOOLS = [
 
 
 # ── 工具函数 ────────────────────────────────────────────
-def _content_block_to_dict(block):
+# 已移至 utils.py: content_block_to_dict
+# 保留别名保持兼容性
+def _content_block_to_dict(block: Any) -> Dict[str, Any]:
     """将 SDK 的 content block 对象转为普通 dict，确保序列化兼容"""
-    if isinstance(block, dict):
-        return block
-    for method in ("model_dump", "dict", "to_dict"):
-        fn = getattr(block, method, None)
-        if callable(fn):
-            return fn()
-    # 兜底：手动提取已知字段
-    d = {"type": getattr(block, "type", "text")}
-    for attr in ("text", "name", "input", "id", "tool_use_id", "content", "source"):
-        if hasattr(block, attr):
-            d[attr] = getattr(block, attr)
-    return d
+    return content_block_to_dict(block)
 
 
 # ── 工具执行函数 ────────────────────────────────────────
@@ -612,7 +615,7 @@ async def handle_web_search(q):
             html = await loop.run_in_executor(None, _fetch, engine["url"])
             result = engine["parse"](html)
             if len(result) > 50:  # 有实质内容才返回
-                return f"🔍 [{engine['name']}] 搜索结果：\n\n{result[:3000]}"
+                return f" [{engine['name']}] 搜索结果：\n\n{result[:3000]}"
         except Exception as e:
             continue  # 引擎失败，自动切到下一个
 
@@ -1119,31 +1122,141 @@ def handle_embedded_doc(query):
 
 
 # ── MCP & Skills 加载 ─────────────────────────────────
-async def load_mcp_tools(servers: list[dict]) -> list[dict]:
+async def load_mcp_tools(servers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """动态加载 MCP 工具"""
-    tools = []
+    tools: List[Dict[str, Any]] = []
+    
+    from mcp.client.stdio import StdioServerParameters
+    
     for srv in servers:
         try:
-            cmd = srv["command"]
-            args = srv.get("args", [])
-            async with stdio_client(cmd, args) as (read, write):
-                session = ClientSession(read, write)
-                await session.initialize()
-                list_resp = await session.list_tools()
-                for t in list_resp.tools:
-                    tools.append({
-                        "name": t.name,
-                        "description": t.description or "",
-                        "input_schema": t.input_schema or {"type": "object", "properties": {}},
-                    })
+            if not isinstance(srv, dict):
+                print(f"  [!] MCP 配置格式错误: {srv}")
+                continue
+            
+            # 支持 HTTP 和 STDIO 两种模式
+            if "url" in srv:
+                # HTTP 模式
+                from mcp.client.streamable_http import streamable_http_client
+                
+                async def load_http_server():
+                    try:
+                        url = srv["url"]
+                        if not url.endswith('/mcp'):
+                            url = url.rstrip('/') + '/mcp'
+                        
+                        import httpx
+                        async with httpx.AsyncClient(http2=True, timeout=30.0) as client:
+                            headers = {
+                                "Accept": "application/json, text/event-stream",
+                                "Content-Type": "application/json"
+                            }
+                            
+                            # 第一次请求：initialize
+                            response = await client.post(url, headers=headers, json={
+                                "jsonrpc": "2.0",
+                                "id": "1",
+                                "method": "initialize",
+                                "params": {
+                                    "protocolVersion": "2024-01-01",
+                                    "capabilities": {},
+                                    "clientInfo": {
+                                        "name": "denny-agent",
+                                        "version": "1.0.0"
+                                    }
+                                }
+                            })
+                            
+                            # 获取 session ID
+                            session_id = response.headers.get('mcp-session-id')
+                            if session_id:
+                                headers['mcp-session-id'] = session_id
+                            
+                            # 第二次请求：tools/list
+                            response = await client.post(url, headers=headers, json={
+                                "jsonrpc": "2.0",
+                                "id": "2",
+                                "method": "tools/list",
+                                "params": {}
+                            })
+                            
+                            import re
+                            data_match = re.search(r'data:\s*(.*)', response.text)
+                            if data_match:
+                                import json
+                                result = json.loads(data_match.group(1))
+                                if 'result' in result and 'tools' in result['result']:
+                                    server_tools = []
+                                    for t in result['result']['tools']:
+                                        server_tools.append({
+                                            "name": t.get('name', ''),
+                                            "description": t.get('description', ''),
+                                            "input_schema": t.get('input_schema', {"type": "object", "properties": {}}),
+                                        })
+                                    print(f"  [MCP] HTTP 模式加载 {len(server_tools)} 个工具")
+                                    return server_tools
+                        return None
+                    except Exception as e:
+                        print(f"  [!] MCP HTTP 连接失败 {srv['url']}: {e}")
+                        return None
+                
+                try:
+                    server_tools = await asyncio.wait_for(load_http_server(), timeout=15.0)
+                    if server_tools:
+                        tools.extend(server_tools)
+                        print(f"  [MCP] HTTP 模式加载 {len(server_tools)} 个工具")
+                except asyncio.TimeoutError:
+                    print(f"  [!] MCP HTTP 加载超时: {srv['url']}")
+                    continue
+            
+            elif "command" in srv:
+                # STDIO 模式
+                cmd = srv["command"]
+                args = srv.get("args", [])
+                
+                server_params = StdioServerParameters(
+                    command=cmd,
+                    args=args
+                )
+                
+                async def load_stdio_server():
+                    try:
+                        async with stdio_client(server_params) as (read, write):
+                            session = ClientSession(read, write)
+                            await session.initialize()
+                            list_resp = await session.list_tools()
+                            server_tools = []
+                            for t in list_resp.tools:
+                                server_tools.append({
+                                    "name": t.name,
+                                    "description": t.description or "",
+                                    "input_schema": t.input_schema or {"type": "object", "properties": {}},
+                                })
+                            return server_tools
+                    except Exception as e:
+                        print(f"  [!] MCP STDIO 连接失败 {cmd}: {e}")
+                        return None
+                
+                try:
+                    server_tools = await asyncio.wait_for(load_stdio_server(), timeout=5.0)
+                    if server_tools:
+                        tools.extend(server_tools)
+                        print(f"  [MCP] STDIO 模式加载 {len(server_tools)} 个工具")
+                except asyncio.TimeoutError:
+                    print(f"  [!] MCP STDIO 加载超时: {cmd}")
+                    continue
+            
+            else:
+                print(f"  [!] MCP 配置缺少 command 或 url: {srv}")
+                
         except Exception as e:
-            print(f"[!] MCP 加载失败 {cmd}: {e}")
+            print(f"  [!] MCP 加载失败 {srv.get('command', srv.get('url', 'unknown'))}: {e}")
     return tools
 
 
-def load_skills(skill_dir: str = "skills") -> list[dict]:
+def load_skills(skill_dir: str = "skills") -> List[Dict[str, Any]]:
     """从 skills/ 目录加载 Skills 工具（描述 + handler 函数自动注册）"""
-    tools = []
+    tools: List[Dict[str, Any]] = []
     skill_path = Path(skill_dir)
     if not skill_path.exists():
         if getattr(sys, 'frozen', False):
@@ -1193,14 +1306,15 @@ class Agent:
         )
         self.model = model or os.getenv("ANTHROPIC_MODEL", "deepseek-v4-flash")
         # 初始化记忆系统
-        self.memory = Memory()
+        max_snapshots = int(os.getenv("MAX_SNAPSHOTS", "10"))
+        self.memory = Memory(max_snapshots=max_snapshots)
         # 初始化操作日志
         self.logger = OperationLog()
         # 构建系统提示词（含长期记忆上下文）
         self._build_system_prompt()
         # 短期对话历史
-        self.messages: list = []
-        self.all_tools = []
+        self.messages: List[Dict[str, Any]] = []
+        self.all_tools: List[Dict[str, Any]] = []
         self._max_history = 20  # 短期记忆保留的最大消息数
 
     def _build_system_prompt(self):
@@ -1217,30 +1331,16 @@ class Agent:
         self.system_prompt = base
 
     @staticmethod
-    def _style():
+    def _style() -> Dict[str, str]:
         """返回终端样式字典"""
-        return {
-            'ai': Fore.GREEN,
-            'user': Fore.CYAN,
-            'tool': Fore.YELLOW,
-            'info': Fore.LIGHTBLUE_EX,
-            'ok': Fore.LIGHTGREEN_EX,
-            'warn': Fore.LIGHTYELLOW_EX,
-            'err': Fore.LIGHTRED_EX + Style.BRIGHT,
-            'dim': Style.DIM,
-            'bright': Style.BRIGHT,
-            'reset': Style.RESET_ALL,
-        }
+        return TerminalStyle.style()
 
     @staticmethod
-    def _box(text, color, width=60):
+    def _box(text: str, color: str, width: int = 60) -> str:
         """用分隔线和颜色包裹文本"""
-        s = Agent._style()
-        line = "─" * width
-        c = color + s['bright'] if color != Fore.GREEN else color
-        return f"  {c}{line}{s['reset']}\n  {color}{text}{s['reset']}\n  {c}{line}"
+        return TerminalStyle.box(text, color, width)
 
-    async def init_tools(self, servers: Optional[list[dict]] = None, skill_dir: str = "skills"):
+    async def init_tools(self, servers: Optional[List[Dict[str, Any]]] = None, skill_dir: str = "skills"):
         """初始化工具集：内置 + MCP + Skills"""
         self.all_tools = list(TOOLS)
 
@@ -1286,10 +1386,10 @@ class Agent:
             if resp.stop_reason == "end_turn":
                 self.memory.add_to_short_term("assistant", partial_text)
                 print(f"  {s['ai']}━" * 20)
-                print(f"  {s['ai']}🤖  Denny Agent  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
+                print(f"  {s['ai']}  Denny Agent  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
                 print(f"  {s['ai']}━" * 20)
                 for line in partial_text.split('\n'):
-                    print(f"  {line}")
+                    print(f"  {sanitize_emoji(line)}")
                 print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
                 self.logger.ai_response(partial_text)
 
@@ -1298,10 +1398,10 @@ class Agent:
                         self.memory.short_term, self.client, self.model
                     )
                     if extracted:
-                        print(f"  {s['ok']}🧠 新增 {len(extracted)} 条长期事实{s['reset']}")
+                        print(f"  {s['ok']} 新增 {len(extracted)} 条长期事实{s['reset']}")
                     self.memory._save_long_term()
                     self.logger.info(f"长期记忆已保存 ({len(extracted)} 条新事实)")
-                    print(f"  {s['info']}💾 长期记忆已保存{s['reset']}")
+                    print(f"  {s['info']} 长期记忆已保存{s['reset']}")
 
                 return partial_text
 
@@ -1318,7 +1418,7 @@ class Agent:
                     tool_name = block.name
                     tool_input = block.input or {}
                     print(f"  {s['tool']}━" * 20)
-                    print(f"  {s['tool']}🔧  {tool_name}{s['reset']}")
+                    print(f"  {s['tool']}  {tool_name}{s['reset']}")
                     if tool_input:
                         print(f"  {s['dim']}{json.dumps(tool_input, ensure_ascii=False)}{s['reset']}")
                     print(f"  {s['tool']}━" * 20)
@@ -1350,7 +1450,7 @@ class Agent:
             # max_tokens 截断：保存已生成的文本，让模型继续补全
             if resp.stop_reason == "max_tokens":
                 self.memory.add_to_short_term("assistant", partial_text)
-                print(f"\n  {s['warn']}📝 输出超长，继续补全...{s['reset']}")
+                print(f"\n  {s['warn']} 输出超长，继续补全...{s['reset']}")
                 # 用 user 消息触发继续生成
                 self.memory.add_to_short_term("user", "请继续完成上面未完成的内容，不要重复已输出的部分，直接从截断处继续。")
                 continue
@@ -1367,7 +1467,7 @@ class Agent:
             print(f"\n  {s['err']}⚠ 没有找到历史快照，无法回退。{s['reset']}")
             print(f"  {s['dim']}提示: 每次自动保存长期记忆时都会生成快照。{s['reset']}")
             return
-        print(f"\n  {s['info']}📋 历史快照（共 {len(backups)} 个，按时间倒序）:{s['reset']}")
+        print(f"\n  {s['info']} 历史快照（共 {len(backups)} 个，按时间倒序）:{s['reset']}")
         print(f"  {s['dim']}{'─' * 56}{s['reset']}")
         print(f"  {s['dim']}{'[0]':>6s}  当前记忆{s['reset']} ({datetime.now().strftime('%m-%d %H:%M')}, "
               f"{self.memory.long_term.get('updated_at', '?')[:19]}, "
@@ -1396,25 +1496,46 @@ class Agent:
                     self.memory.rollback(idx)
                     self._build_system_prompt()
                     self.logger.command("rollback", f"回退到快照 {idx} ({ts})")
-                    print(f"  {s['ok']}✅ 已回退到 {ts} 的快照（短期记忆已清空）{s['reset']}")
+                    print(f"  {s['ok']} 已回退到 {ts} 的快照（短期记忆已清空）{s['reset']}")
                     return
         except (EOFError, KeyboardInterrupt):
             print(f"\n  {s['dim']}已取消回退{s['reset']}")
 
     @staticmethod
-    def _redraw_line(buf, pos):
+    def _char_width(ch: str) -> int:
+        """判断字符的显示宽度（中文等宽字符占2格，ASCII占1格）"""
+        # 东亚宽字符范围
+        if ord(ch) > 127:
+            # CJK 统一汉字、CJK 兼容汉字、全角符号等
+            if (0x4E00 <= ord(ch) <= 0x9FFF or  # CJK 统一汉字
+                0x3400 <= ord(ch) <= 0x4DBF or  # CJK 扩展A
+                0x20000 <= ord(ch) <= 0x2A6DF or  # CJK 扩展B (需要代理对)
+                0x3000 <= ord(ch) <= 0x303F or  # CJK 符号和标点
+                0xFF00 <= ord(ch) <= 0xFFEF or  # 全角ASCII、全角标点
+                0xAC00 <= ord(ch) <= 0xD7AF):   # 韩文
+                return 2
+        return 1
+
+    @staticmethod
+    def _display_width(buf: List[str]) -> int:
+        """计算字符串的显示宽度"""
+        return sum(Agent._char_width(ch) for ch in buf)
+
+    @staticmethod
+    def _redraw_line(buf: List[str], pos: int):
         """从光标位置重绘到行尾（清除可能的残留字符）"""
         import sys
         remaining = ''.join(buf[pos:])
+        remaining_width = Agent._display_width(buf[pos:])
         # 写剩余字符 + 清尾空格 + 退回光标
-        sys.stdout.write(remaining + ' ' + '\b' * (len(remaining) + 1))
+        sys.stdout.write(remaining + ' ' + '\b' * (remaining_width + 1))
         sys.stdout.flush()
 
     @staticmethod
     def _show_commands():
         """显示所有 / 命令列表（带编号）"""
         s = Agent._style()
-        print(f"\n  {s['info']}📋 可用命令:{s['reset']}")
+        print(f"\n  {s['info']} 可用命令:{s['reset']}")
         print(f"  {s['dim']}{'─' * 56}{s['reset']}")
         cmds = [
             ("/quit", "退出程序"),
@@ -1464,7 +1585,7 @@ class Agent:
             return line
 
         # 原生 Windows 控制台，用 msvcrt 逐字读取
-        buf = []
+        buf: List[str] = []
         pos = 0
         print(f"\n{s['user']}> {s['reset']}", end="")
         sys.stdout.flush()
@@ -1480,37 +1601,41 @@ class Agent:
                 if ch in ('\b', '\x7f'):  # Backspace
                     if pos > 0:
                         pos -= 1
-                        buf.pop(pos)
-                        sys.stdout.write('\b \b')
+                        removed_ch = buf.pop(pos)
+                        # 退格数等于被删除字符的显示宽度
+                        backspaces = '\b' * Agent._char_width(removed_ch)
+                        sys.stdout.write(backspaces + ' ' * Agent._char_width(removed_ch) + backspaces)
                         Agent._redraw_line(buf, pos)
                     continue
 
-                if ch == '\x03':
-                    raise KeyboardInterrupt
+                if ch == '\x03':  # Ctrl+C
+                    return "__CTRL_C__"  # 返回特殊标记而不是抛出异常
 
                 if ch == '\xe0':  # 方向键
                     ch2 = msvcrt.getwch()
-                    if ch2 == 'K' and pos > 0:
+                    if ch2 == 'K' and pos > 0:  # 左箭头
                         pos -= 1
-                        sys.stdout.write('\b')
+                        # 退格数等于前一个字符的显示宽度
+                        sys.stdout.write('\b' * Agent._char_width(buf[pos]))
                         sys.stdout.flush()
-                    elif ch2 == 'M' and pos < len(buf):
+                    elif ch2 == 'M' and pos < len(buf):  # 右箭头
+                        ch_width = Agent._char_width(buf[pos])
+                        sys.stdout.write(buf[pos])
                         pos += 1
-                        sys.stdout.write(buf[pos - 1])
                         sys.stdout.flush()
-                    elif ch2 == 'H':
+                    elif ch2 == 'H':  # Home
                         while pos > 0:
                             pos -= 1
-                            sys.stdout.write('\b')
+                            sys.stdout.write('\b' * Agent._char_width(buf[pos]))
                         sys.stdout.flush()
-                    elif ch2 == 'F':
+                    elif ch2 == 'F':  # End
                         while pos < len(buf):
                             sys.stdout.write(buf[pos])
                             pos += 1
                         sys.stdout.flush()
-                    elif ch2 == 'S':
+                    elif ch2 == 'S':  # Delete
                         if pos < len(buf):
-                            buf.pop(pos)
+                            removed_ch = buf.pop(pos)
                             Agent._redraw_line(buf, pos)
                     continue
 
@@ -1541,9 +1666,9 @@ class Agent:
                         matches = [cmd for cmd in SELECTIONS.values() if cmd.startswith(prefix)]
                         if len(matches) == 1:
                             match = matches[0]
-                            # 退格清除当前输入
-                            for _ in range(len(buf)):
-                                sys.stdout.write('\b \b')
+                            # 退格清除当前输入（考虑显示宽度）
+                            display_width = Agent._display_width(buf)
+                            sys.stdout.write('\b' * display_width + ' ' * display_width + '\b' * display_width)
                             sys.stdout.flush()
                             buf = list(match)
                             pos = len(buf)
@@ -1574,7 +1699,7 @@ class Agent:
                     self.memory.short_term, self.client, self.model
                 )
                 if extracted:
-                    print(f"  {s['ok']}🧠 退出提取: 新增 {len(extracted)} 条事实{s['reset']}")
+                    print(f"  {s['ok']} 退出提取: 新增 {len(extracted)} 条事实{s['reset']}")
 
             # 保存长期记忆
             self.memory._save_long_term()
@@ -1582,6 +1707,9 @@ class Agent:
 
             # 生成情景摘要并保存短期记忆快照
             await self._save_episodic_and_snapshot()
+        except asyncio.CancelledError:
+            # 用户主动退出，取消请求是正常的
+            print(f"  {s['warn']}⏹ 退出请求已取消{s['reset']}")
         except Exception as e:
             print(f"  {s['err']}⚠ 退出保存记忆失败: {e}{s['reset']}")
 
@@ -1601,19 +1729,25 @@ class Agent:
                 if short_term_file.exists():
                     short_term_file.unlink()
 
-            # 生成情景记忆摘要
+            # 生成情景记忆摘要（添加异常处理）
             if len(self.memory.short_term) >= 4:
-                summary = await self.memory.summarize_recent(
-                    self.memory.short_term[-4:], self.client, self.model
-                )
-                if summary and len(summary) > 10:
-                    self.memory.episodic.append({
-                        "timestamp": datetime.now().isoformat()[:19],
-                        "summary": summary,
-                    })
-                    # 只保留最近 5 条
-                    if len(self.memory.episodic) > 5:
-                        self.memory.episodic = self.memory.episodic[-5:]
+                try:
+                    summary = await self.memory.summarize_recent(
+                        self.memory.short_term[-4:], self.client, self.model
+                    )
+                    if summary and len(summary) > 10:
+                        self.memory.episodic.append({
+                            "timestamp": datetime.now().isoformat()[:19],
+                            "summary": summary,
+                        })
+                        # 只保留最近 5 条
+                        if len(self.memory.episodic) > 5:
+                            self.memory.episodic = self.memory.episodic[-5:]
+                except asyncio.CancelledError:
+                    # 退出时取消请求是正常的，不报错
+                    self.logger.info("保存记忆时被取消")
+                except Exception as e:
+                    self.logger.error(f"生成情景记忆摘要失败: {e}")
 
             # 持久化情景记忆
             epi_file = self.memory.storage_path / "episodic.json"
@@ -1634,7 +1768,7 @@ class Agent:
                 data = json.loads(short_term_file.read_text(encoding="utf-8"))
                 if isinstance(data, list) and len(data) > 0:
                     self.memory.short_term = data
-                    print(f"  {s['info']}📂 载入上次会话的 {len(data)} 条短期记忆{s['reset']}")
+                    print(f"  {s['info']} 载入上次会话的 {len(data)} 条短期记忆{s['reset']}")
             except Exception:
                 pass
 
@@ -1671,24 +1805,43 @@ class Agent:
         self._load_episodic()
         if self.memory.short_term:
             self._build_system_prompt()  # 重建含短期上下文的系统提示
-            print(f"\n  {s['ok']}✅ 恢复了上次会话 ({len(self.memory.short_term)} 条消息, "
+            print(f"\n  {s['ok']} 恢复了上次会话 ({len(self.memory.short_term)} 条消息, "
                   f"{len(self.memory.long_term.get('facts', []))} 条事实, "
                   f"{len(self.memory.long_term.get('preferences', []))} 条偏好){s['reset']}")
             print(f"  {s['dim']}   输入 /clear 可清空历史重新开始{s['reset']}")
         else:
-            print(f"\n  {s['info']}🔹 Denny Agent 就绪 ({len(self.memory.long_term.get('facts', []))} 条长期事实){s['reset']}")
+            print(f"\n  {s['info']} Denny Agent 就绪 ({len(self.memory.long_term.get('facts', []))} 条长期事实){s['reset']}")
 
         print(f"  {s['dim']}   输入 /quit 退出 | /clear 清空 | /memory 查看记忆 | /help 查看所有命令{s['reset']}")
+        print(f"  {s['dim']}   按 3 次 Ctrl+C 可快速退出{s['reset']}")
+
+        ctrl_c_count = 0  # CTRL+C 计数器
+        ctrl_c_reset_time = 0  # 计数器重置时间
 
         while True:
-            try:
-                user_input = self._read_input().strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                await self._save_on_exit()
-                print(f"  {s['ok']}再见！{s['reset']}")
-                self.logger.close()
-                break
+            user_input = self._read_input()
+            
+            # 检测 Ctrl+C 特殊标记
+            if user_input == "__CTRL_C__":
+                import time as _time
+                now = _time.time()
+                # 如果超过 2 秒，重置计数器
+                if now - ctrl_c_reset_time > 2:
+                    ctrl_c_count = 0
+                ctrl_c_count += 1
+                ctrl_c_reset_time = now
+                
+                if ctrl_c_count >= 3:
+                    print(f"\n  {s['ok']}三次 Ctrl+C，再见！{s['reset']}")
+                    await self._save_on_exit()
+                    self.logger.close()
+                    break
+                else:
+                    print(f"\n  {s['warn']}再按 {3 - ctrl_c_count} 次 Ctrl+C 退出，或继续输入{s['reset']}")
+                    continue
+            
+            ctrl_c_count = 0  # 正常输入后重置计数器
+            user_input = user_input.strip() if user_input else ""
 
             if not user_input:
                 continue
@@ -1704,11 +1857,11 @@ class Agent:
                 self.memory.clear_short_term()
                 self._build_system_prompt()
                 self.logger.command("clear")
-                print(f"  {s['info']}🗑 对话已清空{s['reset']}")
+                print(f"  {s['info']} 对话已清空{s['reset']}")
                 continue
             if cmd in ("memory",):
                 status = self.memory.get_status()
-                print(f"\n  {s['info']}📋 记忆状态:{s['reset']}")
+                print(f"\n  {s['info']} 记忆状态:{s['reset']}")
                 print(f"  {s['dim']}{'─' * 40}{s['reset']}")
                 for k, v in status.items():
                     label = k.replace('_', ' ').capitalize()
@@ -1720,7 +1873,7 @@ class Agent:
                 continue
             if cmd in ("help",):
                 self.logger.command("help")
-                print(f"\n  {s['info']}📋 命令列表:{s['reset']}")
+                print(f"\n  {s['info']} 命令列表:{s['reset']}")
                 print(f"  {s['dim']}{'─' * 40}{s['reset']}")
                 print(f"  {s['user']}/quit{'':12s}{s['reset']}  退出程序")
                 print(f"  {s['user']}/clear{'':12s}{s['reset']}  清空当前对话")
@@ -1745,7 +1898,7 @@ class Agent:
                 try:
                     result = await orchestrator.orchestrate(goal)
                     print(f"\n  {s['ai']}━" * 20)
-                    print(f"  {s['ai']}🧩  Swarm 最终整合结果  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
+                    print(f"  {s['ai']}  Swarm 最终整合结果  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
                     print(f"  {s['ai']}━" * 20)
                     print(f"  {result}")
                     print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
@@ -1829,7 +1982,7 @@ async def main():
         result = await orchestrator.orchestrate(args.swarm_goal)
         s = Agent._style()
         print(f"\n  {s['ai']}━" * 20)
-        print(f"  {s['ai']}🧩  Swarm 最终整合结果{s['reset']}")
+        print(f"  {s['ai']}  Swarm 最终整合结果{s['reset']}")
         print(f"  {s['ai']}━" * 20)
         print(f"  {result}")
         print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
@@ -1844,20 +1997,43 @@ async def main():
             return
         agent = Agent()
         result = await agent.run(pipe_input)
-        print(f"\n[回复] {result}")
+        print(f"\n[回复] {sanitize_emoji(result)}")
         return
 
     # --query 模式：单次问答
     if args.query:
         agent = Agent()
         result = await agent.run(args.query)
-        print(f"\n[回复] {result}")
+        print(f"\n[回复] {sanitize_emoji(result)}")
         return
 
     # 默认：交互式聊天
-    mcp_servers = [
-        # {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]},
-    ]
+    import sys as sys_module
+    mcp_servers = []
+    mcp_config = os.getenv("MCP_SERVERS", "[]")
+    try:
+        mcp_servers = json.loads(mcp_config)
+        if not isinstance(mcp_servers, list):
+            mcp_servers = []
+    except Exception as e:
+        print(f"  [!] MCP_SERVERS 配置解析失败: {e}")
+        mcp_servers = []
+
+    # 如果配置中没有 MCP 服务器，扫描 mcp_servers 目录
+    if not mcp_servers:
+        mcp_dir = Path(__file__).parent / "mcp_servers"
+        if mcp_dir.exists():
+            for server_dir in mcp_dir.iterdir():
+                if server_dir.is_dir():
+                    for file in server_dir.iterdir():
+                        if file.is_file() and file.name.endswith(".py") and file.name != "__init__.py":
+                            # 使用 HTTP 模式（FastMCP 默认端口 8000）
+                            mcp_servers.append({
+                                "url": "http://127.0.0.1:8000"
+                            })
+                            print(f"  [MCP] HTTP 模式: http://127.0.0.1:8000")
+                            break  # 只加载第一个服务器
+
     agent = Agent()
     await agent.chat(servers=mcp_servers)
 

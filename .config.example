@@ -1,4 +1,12 @@
 {
-  "ANTHROPIC_API_KEY": "你的实际 API Key",
-  "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
+  "ANTHROPIC_API_KEY": "你的实际API密钥",
+  "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+  "ANTHROPIC_MODEL": "deepseek-v4-flash",
+  "MAX_SNAPSHOTS": 10,
+  "MCP_SERVERS": [
+    {
+      "command": "python",
+      "args": ["mcp_demo_server.py"]
+    }
+  ]
 }
