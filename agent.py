@@ -1978,14 +1978,21 @@ class Agent:
                 if not is_port_open():
                     import subprocess
                     import os
-                    # 启动 webui.py（后台进程）
+                    # 在打包的 EXE 中，启动同目录下的 webui.exe；否则启动 webui.py
+                    if getattr(sys, 'frozen', False):
+                        webui_path = str(Path(sys.executable).parent / "webui.exe")
+                        webui_cmd = [webui_path]
+                    else:
+                        webui_path = str(Path.cwd() / "webui.py")
+                        webui_cmd = [sys.executable, webui_path]
+                    # 启动 webui（后台进程）
                     startupinfo = None
                     if os.name == "nt":
                         startupinfo = subprocess.STARTUPINFO()
                         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                         startupinfo.wShowWindow = subprocess.SW_HIDE
                     subprocess.Popen(
-                        [sys.executable, "webui.py"],
+                        webui_cmd,
                         cwd=str(Path.cwd()),
                         startupinfo=startupinfo,
                         stdout=subprocess.DEVNULL,
