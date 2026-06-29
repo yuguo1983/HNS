@@ -75,19 +75,19 @@ if ($useGit) {
     if (Test-Path "$INSTALL_DIR\.git") {
         Info "更新已有安装: $INSTALL_DIR"
         Push-Location $INSTALL_DIR
-        git pull --quiet 2>&1 | Out-Null
+        git pull --progress 2>&1 | ForEach-Object { Write-Host "    $_" }
         Pop-Location
         Ok "已更新到最新版本"
     } else {
         Info "克隆仓库到: $INSTALL_DIR"
         # 优先用直连，失败换镜像
         try {
-            git clone --depth 1 --quiet $REPO_URL $INSTALL_DIR 2>&1 | Out-Null
+            git clone --depth 1 --progress $REPO_URL $INSTALL_DIR 2>&1 | ForEach-Object { Write-Host "    $_" }
             if (-not (Test-Path "$INSTALL_DIR\agent.py")) { throw "clone 失败" }
             Ok "克隆成功（直连 GitHub）"
         } catch {
             Warn "直连 GitHub 失败，尝试镜像源..."
-            git clone --depth 1 --quiet $REPO_MIRROR $INSTALL_DIR 2>&1 | Out-Null
+            git clone --depth 1 --progress $REPO_MIRROR $INSTALL_DIR 2>&1 | ForEach-Object { Write-Host "    $_" }
             if (-not (Test-Path "$INSTALL_DIR\agent.py")) {
                 Err "克隆失败，请检查网络或手动下载"
                 exit 1
@@ -99,11 +99,11 @@ if ($useGit) {
     # 无 git：用 pip 直接从 GitHub 安装（不落地源码）
     Info "使用 pip 直接安装（无源码落地）"
     try {
-        pip install "denny-agent @ git+$REPO_URL" --quiet 2>&1 | Out-Null
+        pip install "denny-agent @ git+$REPO_URL" 2>&1 | ForEach-Object { Write-Host "    $_" }
         Ok "pip 安装成功"
     } catch {
         Warn "直连失败，尝试镜像源..."
-        pip install "denny-agent @ git+$REPO_MIRROR" --quiet 2>&1 | Out-Null
+        pip install "denny-agent @ git+$REPO_MIRROR" 2>&1 | ForEach-Object { Write-Host "    $_" }
         if ($LASTEXITCODE -ne 0) {
             Err "安装失败，请检查网络"
             exit 1
@@ -132,7 +132,7 @@ Step "3/5" "安装 Python 依赖..."
 
 Push-Location $INSTALL_DIR
 try {
-    pip install -e . --quiet 2>&1 | Out-Null
+    pip install -e . 2>&1 | ForEach-Object { Write-Host "    $_" }
     if ($LASTEXITCODE -ne 0) { throw "pip install 失败" }
     Ok "依赖安装完成"
 } catch {
