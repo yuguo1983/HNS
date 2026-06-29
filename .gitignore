@@ -1,9 +1,52 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+
+# 环境和配置
 .env
 .config
 *.env.*
 !*.env.example
-__pycache__/
-*.pyc
+.venv/
+venv/
+
+# Agent 数据
 .agent_memory/
+
+# 构建产物
+dist/
+build/
+*.exe
+*.spec.bak
+
+# IDE / AI
+.vscode/
+.idea/
+.claude/
+.atomcode/
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# 日志
+*.log
+
+# 图片
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif
+
+# 不需要的目录
+ymodem_sender_rust/
+粤语金曲TOP20/
+
+# 其他
 HNS.rar
 dist/dist.rar
+CLAUDE.md
