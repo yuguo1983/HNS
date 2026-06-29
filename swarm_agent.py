@@ -13,6 +13,7 @@ import os
 import time
 from typing import Optional
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from anthropic import AsyncAnthropic
 
@@ -20,6 +21,7 @@ from agent import (
     Agent, TOOLS, TOOL_HANDLERS,
     _content_block_to_dict,
     load_mcp_tools, load_skills,
+    sanitize_emoji,
 )
 
 
@@ -113,17 +115,28 @@ class SubAgent:
             ]
 
             max_iter = 20
+            task_prefix = f"  [{self.task.id}] "
             for _ in range(max_iter):
-                resp = await self.client.messages.create(
+                partial_text = ""
+                line_buf = ""
+                async with self.client.messages.stream(
                     model=self.model,
                     system=system_prompt,
                     messages=messages,
                     tools=self.tools,
                     max_tokens=8192,
-                )
-
-                text_blocks = [b for b in resp.content if b.type == "text"]
-                partial_text = "".join(b.text for b in text_blocks)
+                ) as stream:
+                    async for chunk in stream.text_stream:
+                        line_buf += chunk
+                        partial_text += chunk
+                        # 按行打印（带任务前缀），避免并行子任务字符级交错
+                        while "\n" in line_buf:
+                            line, line_buf = line_buf.split("\n", 1)
+                            print(f"{task_prefix}{sanitize_emoji(line)}")
+                    resp = await stream.get_final_message()
+                # 打印剩余未换行内容
+                if line_buf:
+                    print(f"{task_prefix}{sanitize_emoji(line_buf)}")
 
                 if resp.stop_reason == "end_turn":
                     messages.append({"role": "assistant", "content": partial_text})
@@ -366,13 +379,28 @@ class OrchestratorAgent(Agent):
         )
 
         try:
-            resp = await self.client.messages.create(
+            s = Agent._style()
+            print(f"\n  {s['ai']}━" * 20)
+            print(f"  {s['ai']}  Swarm 最终整合结果  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
+            print(f"  {s['ai']}━" * 20)
+            text = ""
+            async with self.client.messages.stream(
                 model=self.model,
                 system=self.system_prompt,
                 messages=[{"role": "user", "content": synthesis_prompt}],
                 max_tokens=8192,
-            )
-            text = "".join(b.text for b in resp.content if b.type == "text")
+            ) as stream:
+                async for chunk in stream.text_stream:
+                    buf = chunk
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        print(f"  {sanitize_emoji(line)}")
+                    if buf:
+                        print(f"  {sanitize_emoji(buf)}", end="", flush=True)
+                    text += chunk
+                resp = await stream.get_final_message()
+            print()
+            print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
             return text
         except Exception as e:
             # 回退：直接拼接结果

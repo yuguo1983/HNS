@@ -15,10 +15,17 @@ from typing import Optional, Any, Callable, Dict, List
 from pathlib import Path
 from datetime import datetime, timedelta
 
+# 强制 stdout/stderr 用 UTF-8，根治 Windows GBK 终端无法输出 emoji/BMP 外字符的报错
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 def sanitize_emoji(text: str) -> str:
     """移除文本中的表情符号，防止 Windows 终端编码错误"""
     emoji_pattern = re.compile(
-        r'[\U00010000-\U0010ffff]|[\u2600-\u26FF]|[\u2700-\u27BF]|[\u203C-\u2049]'
+        r'[\U00010000-\U0010ffff]|[\u2600-\u26FF]|[\u2700-\u27BF]|[\u203C-\u2049]|[\uFE00-\uFE0F]|[\u200D]'
     )
     return emoji_pattern.sub('', text)
 
@@ -1362,8 +1369,19 @@ class Agent:
         print(f"  {s['dim']}  └─ 技能:  {len(skills)}{s['reset']}")
         print(f"  {s['dim']}└─────────────────────────────────────┘{s['reset']}")
 
-    async def run(self, user_input: str) -> str:
-        """执行单轮对话（含工具调用循环 + 记忆管理）"""
+    async def run(self, user_input: str, on_chunk: Optional[Callable[[str], Any]] = None, on_event: Optional[Callable[[str, Any], Any]] = None) -> str:
+        """执行单轮对话（含工具调用循环 + 记忆管理）
+
+        on_chunk: 文本流式回调（每收到一块文本调用），传入增量文本
+        on_event: 事件回调（工具开始/结果等），传入 (事件名, 负载)
+        """
+        async def _emit(callback, *args):
+            if callback is None:
+                return
+            res = callback(*args)
+            if asyncio.iscoroutine(res):
+                await res
+
         self.memory.add_to_short_term("user", user_input)
         s = Agent._style()
         self.logger.user_input(user_input)
@@ -1371,26 +1389,42 @@ class Agent:
         max_iter = 30
 
         for _ in range(max_iter):
-            resp = await self.client.messages.create(
+            # 终端打印 AI 回复头部（webui 模式下 on_chunk 已接管输出，这里仍打印便于后台观察）
+            print(f"  {s['ai']}━" * 20)
+            print(f"  {s['ai']}  Denny Agent  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
+            print(f"  {s['ai']}━" * 20)
+
+            # 流式接收：逐块打印文本，实时看到模型输出过程
+            partial_text = ""
+            at_line_start = True
+            async with self.client.messages.stream(
                 model=self.model,
                 system=self.system_prompt,
                 messages=self.memory.short_term,
                 tools=self.all_tools,
                 max_tokens=8192,
-            )
-
-            # 提取所有文本内容
-            text_blocks = [b for b in resp.content if b.type == "text"]
-            partial_text = "".join(b.text for b in text_blocks)
+            ) as stream:
+                async for chunk in stream.text_stream:
+                    # 按行缩进打印，保持与原输出风格一致
+                    buf = chunk
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        prefix = "  " if at_line_start else ""
+                        print(f"{prefix}{sanitize_emoji(line)}")
+                        at_line_start = True
+                    if buf:
+                        prefix = "  " if at_line_start else ""
+                        print(f"{prefix}{sanitize_emoji(buf)}", end="", flush=True)
+                        at_line_start = False
+                    partial_text += chunk
+                    # 推送给流式回调（webui SSE 用）
+                    await _emit(on_chunk, chunk)
+                resp = await stream.get_final_message()
+            print()  # 流结束后补一个换行
 
             # 模型完成回复
             if resp.stop_reason == "end_turn":
                 self.memory.add_to_short_term("assistant", partial_text)
-                print(f"  {s['ai']}━" * 20)
-                print(f"  {s['ai']}  Denny Agent  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
-                print(f"  {s['ai']}━" * 20)
-                for line in partial_text.split('\n'):
-                    print(f"  {sanitize_emoji(line)}")
                 print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
                 self.logger.ai_response(partial_text)
 
@@ -1424,6 +1458,9 @@ class Agent:
                         print(f"  {s['dim']}{json.dumps(tool_input, ensure_ascii=False)}{s['reset']}")
                     print(f"  {s['tool']}━" * 20)
 
+                    # 通知 webui 工具开始
+                    await _emit(on_event, "tool_start", {"tool": tool_name, "input": tool_input})
+
                     try:
                         handler = TOOL_HANDLERS.get(tool_name)
                         if handler:
@@ -1437,6 +1474,9 @@ class Agent:
                         result = f"[错误] {e}"
 
                     self.logger.tool_call(tool_name, tool_input, result)
+
+                    # 通知 webui 工具结束
+                    await _emit(on_event, "tool_result", {"tool": tool_name, "result": str(result)})
 
                     tool_results.append({
                         "type": "tool_result",
@@ -2024,11 +2064,7 @@ class Agent:
                 )
                 try:
                     result = await orchestrator.orchestrate(goal)
-                    print(f"\n  {s['ai']}━" * 20)
-                    print(f"  {s['ai']}  Swarm 最终整合结果  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
-                    print(f"  {s['ai']}━" * 20)
-                    print(f"  {result}")
-                    print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
+                    # 最终整合结果已由 _synthesize 流式实时打印，这里只记录日志
                     self.logger.swarm(goal, result)
                 except Exception as e:
                     print(f"  {s['err']}⚠ Swarm 错误: {e}{s['reset']}")
@@ -2108,12 +2144,7 @@ async def main():
         from swarm_agent import OrchestratorAgent
         orchestrator = OrchestratorAgent()
         result = await orchestrator.orchestrate(args.swarm_goal)
-        s = Agent._style()
-        print(f"\n  {s['ai']}━" * 20)
-        print(f"  {s['ai']}  Swarm 最终整合结果{s['reset']}")
-        print(f"  {s['ai']}━" * 20)
-        print(f"  {result}")
-        print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
+        # 最终整合结果已由 _synthesize 流式实时打印
         return
 
     # --pipe 模式：从 stdin 读取
@@ -2168,4 +2199,9 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
+    asyncio.run(main())
+
+
+def cli():
+    """pip 安装后的命令行入口（denny）"""
     asyncio.run(main())
