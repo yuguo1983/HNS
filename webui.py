@@ -35,8 +35,7 @@ app.add_middleware(
 if hasattr(sys, "_MEIPASS"):
     _static_dir = os.path.join(sys._MEIPASS, "webui/static")
 else:
-    # 基于 webui.py 所在目录定位，避免 pip 安装后 cwd 不对找不到 static
-    _static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui", "static")
+    _static_dir = "webui/static"
 app.mount("/webui/static", StaticFiles(directory=_static_dir), name="static")
 
 # sessions: session_id -> {"agent": Agent, "initialized": bool, "lock": asyncio.Lock}
@@ -91,11 +90,7 @@ async def _ensure_session_initialized(session: dict):
         if session.get("initialized"):
             return
         try:
-            if getattr(sys, 'frozen', False):
-                base_dir = sys._MEIPASS
-            else:
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-            skill_dir = os.path.join(base_dir, "skills")
+            skill_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
             await session["agent"].init_tools(servers=_MCP_SERVERS, skill_dir=skill_dir)
         except Exception as e:
             print(f"  [!] 宸ュ叿鍒濆鍖栧け璐? {e}")
@@ -182,49 +177,21 @@ async def sse_chat(message: str = "", session_id: str = ""):
         sessions[sid] = session
 
     async def event_generator():
-        # 用队列桥接：agent.run 的回调把 SSE 事件推入队列，主循环再 yield
-        queue: asyncio.Queue = asyncio.Queue()
-        DONE = object()
-
         try:
             yield f"event: session_id\ndata: {json.dumps({'session_id': sid})}\n\n"
             yield f"event: status\ndata: {json.dumps({'phase': 'thinking', 'message': ''})}\n\n"
 
             await _ensure_session_initialized(session)
+            response = await session["agent"].run(message)
 
-            async def on_chunk(chunk: str):
-                await queue.put(f"event: delta\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n")
-
-            async def on_event(name: str, payload):
-                await queue.put(f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n")
-
-            async def run_task():
-                try:
-                    response = await session["agent"].run(message, on_chunk=on_chunk, on_event=on_event)
-                    # 兜底：完整文本也发一次 message，便于前端在没收到 delta 时仍有内容
-                    await queue.put(f"event: message\ndata: {json.dumps({'content': response}, ensure_ascii=False)}\n\n")
-                except Exception as e:
-                    print(f"  [webui] chat error: {e}")
-                    await queue.put(f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n")
-                finally:
-                    await queue.put(DONE)
-
-            task = asyncio.create_task(run_task())
-
-            # 主循环：边消费队列边 yield，实现真正流式
-            while True:
-                item = await queue.get()
-                if item is DONE:
-                    break
-                yield item
-
-            await task
+            yield f"event: message\ndata: {json.dumps({'content': response})}\n\n"
             yield f"event: done\ndata: {json.dumps({'session_id': sid})}\n\n"
 
         except Exception as e:
             err_msg = str(e)
             print(f"  [webui] chat error: {err_msg}")
             yield f"event: error\ndata: {json.dumps({'error': err_msg})}\n\n"
+        finally:
             yield f"event: done\ndata: {json.dumps({'session_id': sid})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -270,8 +237,8 @@ async def health():
 if __name__ == "__main__":
     print("=" * 56)
     print("  Denny Agent WebUI")
-    print("  URL: http://localhost:8000")
-    print(f"  MCP servers: {len(_MCP_SERVERS)}")
+    print(f"  璺緞: http://localhost:8000")
+    print(f"  MCP 鏈嶅姟鍣? {len(_MCP_SERVERS)} 涓?)
     print("=" * 56)
 
     def open_browser():
