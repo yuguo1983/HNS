@@ -56,7 +56,9 @@ config = load_config()
 # 无论验证是否通过，都设置环境变量（验证只是给出警告）
 for key, value in config.items():
     if value:  # 只设置非空值
-        os.environ[key] = str(value)
+        # list/dict 类型用 json.dumps 保证产出合法 JSON 字符串，
+        # 否则 str([...]) 会用单引号，后续 json.loads 解析失败
+        os.environ[key] = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value)
 
 is_valid, config_errors = validate_config(config)
 if not is_valid:
