@@ -33,6 +33,9 @@ from anthropic import AsyncAnthropic
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
+# 确保同目录模块可被 import（pip 安装后 agent.py 所在目录可能不在 sys.path）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from utils import (
     TerminalStyle,
     load_config,
