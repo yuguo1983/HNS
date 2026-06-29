@@ -1,14 +1,20 @@
-# AtomCode Agent 一键安装脚本
-# 用法: irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex
-# 或本地: iwr -useb install.ps1 | iex
+# ─────────────────────────────────────────────────────────
+# Denny Agent 一键安装脚本
+#
+# 用法 (PowerShell):
+#   irm https://raw.githubusercontent.com/yuguo1983/HNS/main/scripts/install.ps1 | iex
+#
+# 说明: 安装脚本从 GitHub 下载（文件小、秒下），
+#       项目代码从 atomgit 克隆（国内快、主源）
+# ─────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────
 # 1. 配置区
 # ─────────────────────────────────────────────────────────
 $ErrorActionPreference = "Stop"
 
-$REPO_URL      = "https://github.com/yuguo1983/HNS.git"
-$REPO_MIRROR   = "https://gh-proxy.com/https://github.com/yuguo1983/HNS.git"
+$REPO_URL      = "https://atomgit.com/denny168/agent.git"
+$REPO_MIRROR   = "https://github.com/yuguo1983/HNS.git"
 $INSTALL_DIR   = "$env:USERPROFILE\denny-agent"
 $PY_MIN_VERSION = "3.10"
 
