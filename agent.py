@@ -1225,10 +1225,26 @@ async def load_mcp_tools(servers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 # STDIO 模式
                 cmd = srv["command"]
                 args = srv.get("args", [])
-                
+                # 将 args 里的相对路径解析为基于 agent.py 所在目录的绝对路径
+                # 避免 cwd 不在 agent.py 同目录时找不到 MCP 脚本
+                if not getattr(sys, 'frozen', False):
+                    _base = Path(__file__).resolve().parent
+                else:
+                    _base = Path(sys.executable).resolve().parent
+                resolved_args = []
+                for a in args:
+                    a_path = Path(a)
+                    if a_path.is_absolute() and a_path.exists():
+                        resolved_args.append(a)
+                    elif not a_path.is_absolute() and (_base / a).exists():
+                        resolved_args.append(str(_base / a))
+                    else:
+                        resolved_args.append(a)  # 非路径参数，原样保留
+                # 设置 cwd 为 agent.py 所在目录，确保 MCP 脚本能找到同目录依赖
                 server_params = StdioServerParameters(
                     command=cmd,
-                    args=args
+                    args=resolved_args,
+                    cwd=str(_base)
                 )
                 
                 async def load_stdio_server():
@@ -1270,6 +1286,12 @@ def load_skills(skill_dir: str = "skills") -> List[Dict[str, Any]]:
     """从 skills/ 目录加载 Skills 工具（描述 + handler 函数自动注册）"""
     tools: List[Dict[str, Any]] = []
     skill_path = Path(skill_dir)
+    # 相对路径基于 agent.py 所在目录解析（pip 安装后 cwd 可能不在 agent.py 同目录）
+    if not skill_path.is_absolute():
+        if getattr(sys, 'frozen', False):
+            skill_path = Path(sys.executable).resolve().parent / skill_path
+        else:
+            skill_path = Path(__file__).resolve().parent / skill_path
     if not skill_path.exists():
         if getattr(sys, 'frozen', False):
             skill_path = Path(sys.executable).resolve().parent / "skills"
