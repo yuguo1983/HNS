@@ -1397,9 +1397,14 @@ class Agent:
             print(f"  {s['ai']}  Denny Agent  {s['dim']}{datetime.now().strftime('%H:%M')}{s['reset']}")
             print(f"  {s['ai']}━" * 20)
 
-            # 流式接收：逐块打印文本，实时看到模型输出过程
+            # 流式接收：逐事件打印，实时看到思考过程 + 文本 + 工具参数生成
             partial_text = ""
+            partial_thinking = ""
             at_line_start = True
+            in_thinking = False
+            in_tool_input = False
+            current_tool_name = ""
+            current_tool_json = ""
             async with self.client.messages.stream(
                 model=self.model,
                 system=self.system_prompt,
@@ -1407,27 +1412,88 @@ class Agent:
                 tools=self.all_tools,
                 max_tokens=8192,
             ) as stream:
-                async for chunk in stream.text_stream:
-                    # 按行缩进打印，保持与原输出风格一致
-                    buf = chunk
-                    while "\n" in buf:
-                        line, buf = buf.split("\n", 1)
-                        prefix = "  " if at_line_start else ""
-                        print(f"{prefix}{sanitize_emoji(line)}")
-                        at_line_start = True
-                    if buf:
-                        prefix = "  " if at_line_start else ""
-                        print(f"{prefix}{sanitize_emoji(buf)}", end="", flush=True)
-                        at_line_start = False
-                    partial_text += chunk
-                    # 推送给流式回调（webui SSE 用）
-                    await _emit(on_chunk, chunk)
+                async for event in stream:
+                    # --- 内容块开始 ---
+                    if event.type == "content_block_start":
+                        block = event.content_block
+                        if block.type == "thinking":
+                            in_thinking = True
+                            partial_thinking = ""
+                            print(f"  {s['dim']}💭 思考中...{s['reset']}")
+                        elif block.type == "text":
+                            # 如果刚结束 thinking，打印分隔
+                            if in_thinking:
+                                in_thinking = False
+                                print(f"  {s['dim']}{'─' * 40}{s['reset']}")
+                        elif block.type == "tool_use":
+                            in_tool_input = True
+                            current_tool_name = block.name
+                            current_tool_json = ""
+                            print(f"  {s['tool']}🔧 {current_tool_name}{s['dim']} 生成参数中...{s['reset']}")
+
+                    # --- 内容块增量 ---
+                    elif event.type == "content_block_delta":
+                        delta = event.delta
+                        # 思考增量
+                        if delta.type == "thinking_delta":
+                            think_chunk = delta.thinking
+                            partial_thinking += think_chunk
+                            # 逐行打印思考内容（暗色缩进）
+                            buf = think_chunk
+                            while "\n" in buf:
+                                line, buf = buf.split("\n", 1)
+                                print(f"  {s['dim']}{sanitize_emoji(line)}{s['reset']}")
+                            if buf:
+                                print(f"  {s['dim']}{sanitize_emoji(buf)}{s['reset']}", end="", flush=True)
+                        # 文本增量
+                        elif delta.type == "text_delta":
+                            text_chunk = delta.text
+                            partial_text += text_chunk
+                            buf = text_chunk
+                            while "\n" in buf:
+                                line, buf = buf.split("\n", 1)
+                                prefix = "  " if at_line_start else ""
+                                print(f"{prefix}{sanitize_emoji(line)}")
+                                at_line_start = True
+                            if buf:
+                                prefix = "  " if at_line_start else ""
+                                print(f"{prefix}{sanitize_emoji(buf)}", end="", flush=True)
+                                at_line_start = False
+                            # 推送给流式回调（webui SSE 用）
+                            await _emit(on_chunk, text_chunk)
+                        # 工具输入 JSON 增量
+                        elif delta.type == "input_json_delta":
+                            json_chunk = delta.partial_json
+                            current_tool_json += json_chunk
+                            # 实时打印参数生成进度（每 20 字符刷新一行）
+                            print(f"\r  {s['tool']}{current_tool_name}{s['dim']} {current_tool_json[-60:]}{s['reset']}", end="", flush=True)
+
+                    # --- 内容块结束 ---
+                    elif event.type == "content_block_stop":
+                        if in_thinking:
+                            in_thinking = False
+                            print()  # thinking 末尾换行
+                            print(f"  {s['dim']}{'─' * 40}{s['reset']}")
+                        if in_tool_input:
+                            in_tool_input = False
+                            # 尝试格式化完整 JSON
+                            try:
+                                parsed = json.loads(current_tool_json)
+                                pretty = json.dumps(parsed, ensure_ascii=False, indent=2)
+                            except Exception:
+                                pretty = current_tool_json
+                            print(f"\r  {s['tool']}{current_tool_name}{s['reset']}")
+                            for _line in pretty.split("\n"):
+                                print(f"    {s['dim']}{_line}{s['reset']}")
+
                 resp = await stream.get_final_message()
             print()  # 流结束后补一个换行
 
             # 模型完成回复
             if resp.stop_reason == "end_turn":
-                self.memory.add_to_short_term("assistant", partial_text)
+                # 保存完整内容块（含 thinking），确保后续 API 调用兼容
+                assistant_content = [_content_block_to_dict(b) for b in resp.content]
+                self.memory.add_to_short_term("assistant", assistant_content)
                 print(f"  {s['dim']}━━━━━━━━━━━━━━━━━━━━━━━━━━{s['reset']}")
                 self.logger.ai_response(partial_text)
 
@@ -1491,9 +1557,10 @@ class Agent:
                     self.memory.add_to_short_term("user", tool_results)
                 continue
 
-            # max_tokens 截断：保存已生成的文本，让模型继续补全
+            # max_tokens 截断：保存已生成的内容块，让模型继续补全
             if resp.stop_reason == "max_tokens":
-                self.memory.add_to_short_term("assistant", partial_text)
+                assistant_content = [_content_block_to_dict(b) for b in resp.content]
+                self.memory.add_to_short_term("assistant", assistant_content)
                 print(f"\n  {s['warn']} 输出超长，继续补全...{s['reset']}")
                 # 用 user 消息触发继续生成
                 self.memory.add_to_short_term("user", "请继续完成上面未完成的内容，不要重复已输出的部分，直接从截断处继续。")
@@ -2021,13 +2088,18 @@ class Agent:
                 if not is_port_open():
                     import subprocess
                     import os
-                    # 在打包的 EXE 中，启动同目录下的 webui.exe；否则启动 webui.py
+                    # 定位 webui：基于 agent.py 所在目录（pip 安装后与 agent.py 同目录）
+                    # 而非 cwd，避免用户在任意目录运行 denny 时找不到 webui.py
+                    _agent_dir = os.path.dirname(os.path.abspath(__file__))
                     if getattr(sys, 'frozen', False):
+                        # 打包 EXE 模式：同目录下的 webui.exe
                         webui_path = str(Path(sys.executable).parent / "webui.exe")
                         webui_cmd = [webui_path]
+                        webui_cwd = str(Path(sys.executable).parent)
                     else:
-                        webui_path = str(Path.cwd() / "webui.py")
+                        webui_path = str(Path(_agent_dir) / "webui.py")
                         webui_cmd = [sys.executable, webui_path]
+                        webui_cwd = _agent_dir
                     # 启动 webui（后台进程）
                     startupinfo = None
                     if os.name == "nt":
@@ -2036,7 +2108,7 @@ class Agent:
                         startupinfo.wShowWindow = subprocess.SW_HIDE
                     subprocess.Popen(
                         webui_cmd,
-                        cwd=str(Path.cwd()),
+                        cwd=webui_cwd,
                         startupinfo=startupinfo,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,

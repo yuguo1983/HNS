@@ -35,7 +35,8 @@ app.add_middleware(
 if hasattr(sys, "_MEIPASS"):
     _static_dir = os.path.join(sys._MEIPASS, "webui/static")
 else:
-    _static_dir = "webui/static"
+    # 基于 webui.py 所在目录定位，避免 pip 安装后 cwd 不对找不到 static
+    _static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui", "static")
 app.mount("/webui/static", StaticFiles(directory=_static_dir), name="static")
 
 # sessions: session_id -> {"agent": Agent, "initialized": bool, "lock": asyncio.Lock}
