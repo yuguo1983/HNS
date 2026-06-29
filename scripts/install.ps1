@@ -12,8 +12,9 @@ $REPO_MIRROR   = "https://gh-proxy.com/https://github.com/yuguo1983/HNS.git"
 $INSTALL_DIR   = "$env:USERPROFILE\denny-agent"
 $PY_MIN_VERSION = "3.10"
 
-# ANSI 颜色（PowerShell 5+ 支持）
-function C($code) { return "`e[$code m" }
+# ANSI 颜色（兼容 PowerShell 5.1+）
+$ESC = [char]0x1b
+function C($code) { return "$ESC[${code}m" }
 $BLUE   = C("34")
 $GREEN  = C("32")
 $YELLOW = C("33")
@@ -75,19 +76,19 @@ if ($useGit) {
     if (Test-Path "$INSTALL_DIR\.git") {
         Info "更新已有安装: $INSTALL_DIR"
         Push-Location $INSTALL_DIR
-        git pull --progress 2>&1 | ForEach-Object { Write-Host "    $_" }
+        & git pull --progress
         Pop-Location
         Ok "已更新到最新版本"
     } else {
         Info "克隆仓库到: $INSTALL_DIR"
         # 优先用直连，失败换镜像
         try {
-            git clone --depth 1 --progress $REPO_URL $INSTALL_DIR 2>&1 | ForEach-Object { Write-Host "    $_" }
+            & git clone --depth 1 --progress $REPO_URL $INSTALL_DIR
             if (-not (Test-Path "$INSTALL_DIR\agent.py")) { throw "clone 失败" }
             Ok "克隆成功（直连 GitHub）"
         } catch {
             Warn "直连 GitHub 失败，尝试镜像源..."
-            git clone --depth 1 --progress $REPO_MIRROR $INSTALL_DIR 2>&1 | ForEach-Object { Write-Host "    $_" }
+            & git clone --depth 1 --progress $REPO_MIRROR $INSTALL_DIR
             if (-not (Test-Path "$INSTALL_DIR\agent.py")) {
                 Err "克隆失败，请检查网络或手动下载"
                 exit 1
@@ -99,11 +100,11 @@ if ($useGit) {
     # 无 git：用 pip 直接从 GitHub 安装（不落地源码）
     Info "使用 pip 直接安装（无源码落地）"
     try {
-        pip install "denny-agent @ git+$REPO_URL" 2>&1 | ForEach-Object { Write-Host "    $_" }
+        & python -m pip install "denny-agent @ git+$REPO_URL"
         Ok "pip 安装成功"
     } catch {
         Warn "直连失败，尝试镜像源..."
-        pip install "denny-agent @ git+$REPO_MIRROR" 2>&1 | ForEach-Object { Write-Host "    $_" }
+        & python -m pip install "denny-agent @ git+$REPO_MIRROR"
         if ($LASTEXITCODE -ne 0) {
             Err "安装失败，请检查网络"
             exit 1
@@ -132,11 +133,13 @@ Step "3/5" "安装 Python 依赖..."
 
 Push-Location $INSTALL_DIR
 try {
-    pip install -e . 2>&1 | ForEach-Object { Write-Host "    $_" }
-    if ($LASTEXITCODE -ne 0) { throw "pip install 失败" }
+    # 直接调用，让 pip 完整输出显示（含错误详情）
+    & python -m pip install -e .
+    if ($LASTEXITCODE -ne 0) { throw "pip install 失败 (exit $LASTEXITCODE)" }
     Ok "依赖安装完成"
 } catch {
-    Err "依赖安装失败，请手动运行: pip install -r requirements.txt"
+    Err "依赖安装失败: $_"
+    Warn "请手动运行: cd $INSTALL_DIR; pip install -r requirements.txt"
     Pop-Location
     exit 1
 }
